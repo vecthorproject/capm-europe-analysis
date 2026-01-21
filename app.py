@@ -191,3 +191,90 @@ if st.session_state.get('analysis_done'):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary"
     )
+    
+# =========================
+# SEZIONE DOCUMENTAZIONE (DA AGGIUNGERE ALLA FINE DEL FILE)
+# =========================
+st.markdown("---")
+st.header("📚 Documentazione del Progetto")
+
+with st.expander("📖 Leggi la Relazione Completa (Scopo, Metodologia e Codice)"):
+    st.markdown("""
+    ### 1. Scopo del Progetto
+    L'obiettivo di questo applicativo è condurre una **verifica empirica ex-post** della teoria finanziaria moderna, mettendo a confronto il modello teorico (CAPM) con la realtà dei mercati azionari europei.
+    
+    In particolare, il progetto risponde a tre domande fondamentali:
+    1.  **Quanto sono rischiosi** i singoli mercati nazionali (Italia, Germania, Francia, Spagna) rispetto alla media europea?
+    2.  **Quale rendimento avrebbero dovuto offrire** teoricamente per compensare tale rischio?
+    3.  **Hanno effettivamente pagato** quel rendimento negli ultimi 5 anni?
+    
+    ---
+
+    ### 2. Flusso di Lavoro (Pipeline)
+    L'analisi segue un processo strutturato in 4 fasi automatiche:
+    
+    1.  **Data Ingestion:** Il sistema scarica in tempo reale i prezzi di chiusura *adjusted* (rettificati per dividendi e split) da Yahoo Finance per gli ultimi 5 anni.
+    2.  **Risk Assessment (Beta):** Viene calcolata la sensibilità di ogni indice nazionale rispetto al benchmark europeo (`^STOXX50E`) tramite regressione lineare.
+    3.  **Pricing (CAPM):** Utilizzando parametri accademici (Risk Free e Market Premium), si calcola il "Prezzo del Rischio", ovvero il rendimento minimo atteso.
+    4.  **Performance Evaluation:** Si confronta l'attesa con la realtà (CAGR effettivo) per determinare l'Alpha (extra-rendimento) o la sottoperformance.
+
+    ---
+
+    ### 3. Razionale Metodologico (Scelta dei Parametri)
+    Per garantire rigore scientifico, i parametri di input non sono arbitrari ma derivano da standard accademici:
+    
+    * **Risk-Free Rate ($R_f$):** Viene utilizzato il rendimento del **Bund Tedesco a 10 anni** (approssimato al 2.5%). Rappresenta l'investimento privo di rischio nell'Eurozona, evitando le distorsioni legate allo spread dei titoli periferici (es. BTP).
+    * **Market Risk Premium ($R_m - R_f$):** Il premio per il rischio è fissato al **5.8%**, basandosi sulla **Survey 2025 di Pablo Fernandez (IESE Business School)**, la fonte più autorevole per il consensus di analisti e accademici.
+    * **Orizzonte Temporale:** 5 anni con dati mensili ($N=60$). La frequenza mensile è preferita a quella giornaliera per eliminare il "rumore" statistico di breve termine e stabilizzare la stima del Beta.
+
+    ---
+    
+    ### 4. Spiegazione del Codice e Logica Matematica
+    Di seguito viene analizzato il funzionamento del "motore" Python sottostante.
+
+    #### A. Calcolo dei Rendimenti Logaritmici
+    """)
+    
+    st.code("""
+log_returns = np.log(close_data / close_data.shift(1)).dropna()
+    """, language='python')
+    
+    st.markdown("""
+    **Perché:** In finanza quantitativa si usano i rendimenti logaritmici (o *log-returns*) invece di quelli semplici perché sono additivi nel tempo e seguono meglio una distribuzione normale, requisito fondamentale per la regressione lineare.
+    """)
+
+    st.markdown("#### B. Calcolo del Beta (Regressione Lineare)")
+    st.code("""
+# Y = Asset (es. FTSEMIB), X = Mercato (STOXX50)
+model = sm.OLS(Y, X).fit()
+beta = model.params.iloc[1]
+    """, language='python')
+    
+    st.markdown("""
+    **Cosa succede:** Utilizziamo la libreria `statsmodels` per eseguire una regressione **OLS (Ordinary Least Squares)**. 
+    Il **Beta ($\beta$)** rappresenta la pendenza della retta di regressione:
+    * $\beta > 1$: L'indice è **Amplificativo** (Aggressivo).
+    * $\beta < 1$: L'indice è **Riduttivo** (Difensivo).
+    """)
+
+    st.markdown("#### C. Formula del CAPM (Rendimento Atteso)")
+    st.latex(r'''
+    E(R_i) = R_f + \beta_i \times (R_m - R_f)
+    ''')
+    st.markdown("""
+    Il codice applica questa formula per stabilire il rendimento teorico "giusto" dato il livello di rischio.
+    """)
+
+    st.markdown("#### D. Confronto con la Realtà (Rendimento Effettivo)")
+    st.code("""
+realized_return = (end_p / start_p) ** (1 / years) - 1
+deviation = realized_return - expected_return
+    """, language='python')
+    
+    st.markdown("""
+    **Il Delta (Alpha Proxy):** Infine, calcoliamo il rendimento reale composto annualizzato (**CAGR**) e lo sottraiamo al rendimento atteso CAPM.
+    * **Delta Positivo:** Il mercato ha sovraperformato le attese teoriche.
+    * **Delta Negativo:** Il rischio assunto non è stato remunerato adeguatamente dal mercato.
+    """)
+    
+    st.info("Questa architettura garantisce che i risultati siano basati su dati reali e metodologie trasparenti, permettendo una verifica istantanea delle ipotesi di mercato.")
