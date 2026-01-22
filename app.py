@@ -8,249 +8,267 @@ import io
 # =========================
 # CONFIGURAZIONE PAGINA
 # =========================
-st.set_page_config(page_title="Analisi Beta & CAPM (Metodo Prof)", layout="wide")
+st.set_page_config(page_title="Analisi Finanziaria Beta & CAPM", layout="wide")
 
-st.title("📊 Analisi Beta & CAPM (Metodo Classico)")
+st.title("📊 Analisi Finanziaria: Beta, CAPM e Dati Storici")
 st.markdown("""
-Replica esatta della metodologia basata su:
-* **Dati Completi:** Apertura, Massimo, Minimo, Chiusura, Volume.
-* **Calcolo:** Variazione Percentuale Semplice (Var %).
-* **Formula Beta:** Rapporto tra Covarianza e Varianza.
+Strumento di calcolo del **Costo del Capitale** e del **Rischio Sistematico (Beta)**.
+Confronto diretto (Side-by-Side) tra Asset e Benchmark (FTSE MIB) su base settimanale.
 """)
 
 # =========================
-# SIDEBAR - PARAMETRI
+# SIDEBAR - INPUT
 # =========================
-st.sidebar.header("⚙️ Input Dati")
+st.sidebar.header("⚙️ Configurazione Analisi")
 
 default_tickers = "ENEL.MI, ISP.MI, ENI.MI"
-user_tickers = st.sidebar.text_area("Inserisci Ticker (es. ENEL.MI)", default_tickers, height=100)
+user_tickers = st.sidebar.text_area("Ticker (es. ENEL.MI, ISP.MI)", default_tickers, height=100)
 benchmark_ticker = "FTSEMIB.MI"
 
 st.sidebar.markdown("---")
 st.sidebar.header("Parametri CAPM")
 rf_input = st.sidebar.number_input("Risk Free Rate (BTP 10Y)", value=3.8, step=0.1) / 100
-mrp_input = st.sidebar.number_input("Market Risk Premium", value=5.5, step=0.1) / 100
+mrp_input = st.sidebar.number_input("Market Risk Premium (Fernandez)", value=5.5, step=0.1) / 100
 years_input = st.sidebar.slider("Orizzonte Temporale (Anni)", 1, 5, 2) 
 
-st.sidebar.info("Clicca **Avvia Analisi** per generare il report.")
+st.sidebar.info("Premi **Avvia Analisi** per generare il report.")
 
 # =========================
-# FUNZIONI (MOTORE PROF)
+# MOTORE DI CALCOLO
 # =========================
 
 @st.cache_data
-def get_detailed_data(ticker_string, years):
-    """Scarica dati OHLCV completi per replica tabella prof"""
-    tickers = [t.strip() for t in ticker_string.split(',') if t.strip() != ""]
-    if benchmark_ticker not in tickers:
-        tickers.append(benchmark_ticker)
-    
+def get_data_pair(ticker, benchmark, years):
+    """Scarica i dati per una coppia Ticker-Benchmark e li allinea"""
     try:
-        # Scarichiamo tutto (Open, High, Low, Close, Volume)
-        data = yf.download(tickers, period=f"{years}y", interval="1wk", auto_adjust=False, progress=False)
-        return data
+        # Scarichiamo entrambi i ticker
+        data = yf.download([ticker, benchmark], period=f"{years}y", interval="1wk", auto_adjust=False, progress=False)
+        
+        # Estraiamo i dati grezzi
+        try:
+            closes = data["Close"][[ticker, benchmark]].dropna()
+            opens = data["Open"][[ticker, benchmark]].dropna()
+            highs = data["High"][[ticker, benchmark]].dropna()
+            lows = data["Low"][[ticker, benchmark]].dropna()
+            vols = data["Volume"][[ticker, benchmark]].dropna()
+        except KeyError:
+            return None, None
+
+        # Allineamento date (Intersezione)
+        common_index = closes.index
+        
+        # Creiamo DataFrame Asset
+        df_asset = pd.DataFrame({
+            "Data": common_index,
+            "Ultimo": closes[ticker],
+            "Apertura": opens[ticker],
+            "Massimo": highs[ticker],
+            "Minimo": lows[ticker],
+            "Volume": vols[ticker]
+        }).set_index("Data")
+
+        # Creiamo DataFrame Benchmark
+        df_bench = pd.DataFrame({
+            "Data": common_index,
+            "Ultimo": closes[benchmark],
+            "Apertura": opens[benchmark],
+            "Massimo": highs[benchmark],
+            "Minimo": lows[benchmark],
+            "Volume": vols[benchmark]
+        }).set_index("Data")
+        
+        return df_asset, df_bench
+
     except Exception as e:
-        st.error(f"Errore download: {e}")
-        return pd.DataFrame()
+        return None, None
 
-def calculate_prof_metrics(data, rf, mrp, years):
-    """Calcola Beta usando Covarianza/Varianza e Var % Semplice"""
+def calculate_metrics_and_structure(df_asset, df_bench, rf, mrp, years):
+    """Calcola Beta, Var% e struttura il DataFrame finale"""
     
-    # 1. Estrazione e Pulizia Prezzi di Chiusura (Adj Close per i calcoli reali, Close per tabella)
-    # Nota: Per replicare la prof usiamo 'Close' o 'Adj Close'. Solitamente Yahoo da Adj Close di default.
-    # Usiamo 'Close' puro se vogliamo replicare i prezzi che vede a video, ma 'Adj Close' è finanziariamente corretto.
-    # Per coerenza con la tabella "DataUltimo", usiamo Close.
+    # 1. Calcolo Variazione % (Rendimento Semplice)
+    df_asset["Var %"] = df_asset["Ultimo"].pct_change()
+    df_asset["Rendimento %"] = df_asset["Var %"]
     
-    try:
-        # Gestione colonne MultiIndex di yfinance
-        closes = data["Close"] 
-        opens = data["Open"]
-        highs = data["High"]
-        lows = data["Low"]
-        vols = data["Volume"]
-    except KeyError:
-        st.error("Errore nella struttura dei dati scaricati.")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    df_bench["Var %"] = df_bench["Ultimo"].pct_change()
+    df_bench["Rendimento %"] = df_bench["Var %"]
 
-    # 2. Calcolo Variazione Percentuale (Var %) - Metodo Semplice
-    # Formula: (Prezzo_t - Prezzo_t-1) / Prezzo_t-1
-    returns = closes.pct_change().dropna()
+    # Rimuoviamo la prima riga che è NaN
+    df_asset = df_asset.dropna()
+    df_bench = df_bench.dropna()
     
-    if benchmark_ticker not in returns.columns:
-        st.error("Benchmark mancante.")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    # Ri-allineamento
+    common_idx = df_asset.index.intersection(df_bench.index)
+    df_asset = df_asset.loc[common_idx].sort_index(ascending=False) # Dal più recente
+    df_bench = df_bench.loc[common_idx].sort_index(ascending=False)
 
-    market_ret = returns[benchmark_ticker]
+    # 2. Calcolo Beta (Covarianza / Varianza)
+    y = df_asset["Var %"]
+    x = df_bench["Var %"]
     
-    results_list = []
+    covariance = np.cov(y, x)[0][1]
+    variance = np.var(x, ddof=1) 
+    beta = covariance / variance
     
-    # Creiamo anche un DataFrame gigante per l'Excel dettagliato
-    detailed_export = pd.DataFrame()
+    # 3. Parametri CAPM
+    expected_return = rf + beta * mrp
+    
+    # 4. Preparazione Dati per Excel (Side-by-Side)
+    asset_cols = df_asset.add_suffix(" (Asset)")
+    bench_cols = df_bench.add_suffix(" (Mkt)")
+    
+    combined_df = pd.concat([asset_cols, bench_cols], axis=1)
+    
+    stats = {
+        "Beta": beta,
+        "Covarianza": covariance,
+        "Varianza": variance,
+        "Exp Return": expected_return
+    }
+    
+    return combined_df, stats
 
-    for asset in returns.columns:
-        if asset == benchmark_ticker:
-            continue
-            
-        asset_ret = returns[asset]
-        
-        # Allineamento dati (intersezione date)
-        common_idx = asset_ret.index.intersection(market_ret.index)
-        y = asset_ret.loc[common_idx]
-        x = market_ret.loc[common_idx]
-        
-        # --- IL CUORE DEL CALCOLO (METODO PROF) ---
-        # Covarianza (Asset, Mercato)
-        covariance = np.cov(y, x)[0][1]
-        # Varianza (Mercato)
-        variance = np.var(x, ddof=1) # ddof=1 per varianza campionaria (Excel VAR.S)
-        
-        # Beta = Cov / Var
-        beta = covariance / variance
-        # ------------------------------------------
-        
-        # Classificazione
-        if beta < 0.8: natura = "Riduttivo (Strong)"
-        elif beta < 1: natura = "Riduttivo (Mod.)"
-        elif beta < 1.2: natura = "Amplificativo (Mod.)"
-        else: natura = "Amplificativo (Aggr.)"
-
-        # CAPM & Performance
-        expected_return = rf + beta * mrp
-        
-        start_p = closes[asset].iloc[0]
-        end_p = closes[asset].iloc[-1]
-        # CAGR Semplice
-        realized_return = (end_p / start_p) ** (1 / years) - 1
-        deviation = realized_return - expected_return
-        
-        results_list.append({
-            "Ticker": asset,
-            "Beta": round(beta, 3),
-            "Covarianza": covariance, # Dato Prof
-            "Varianza Mkt": variance, # Dato Prof
-            "Natura": natura,
-            "Rendimento Atteso (CAPM)": round(expected_return * 100, 2),
-            "Rendimento Reale": round(realized_return * 100, 2),
-            "Delta": round(deviation * 100, 2)
-        })
-
-        # --- PREPARAZIONE DATI PER EXCEL DETTAGLIATO (Replica Tabella) ---
-        # Creiamo un blocco per questo ticker
-        temp_df = pd.DataFrame({
-            "Data": closes.index,
-            "Ticker": asset,
-            "Apertura": opens[asset],
-            "Massimo": highs[asset],
-            "Minimo": lows[asset],
-            "Ultimo (Close)": closes[asset],
-            "Volume": vols[asset],
-            "Var %": returns[asset] * 100 # In formato percentuale leggibile
-        }).sort_index(ascending=False) # Dal più recente al più vecchio come la prof
-        
-        detailed_export = pd.concat([detailed_export, temp_df])
-
-    return pd.DataFrame(results_list), returns, detailed_export
-
-def generate_prof_excel(summary_df, detailed_df, rf, mrp):
-    """Genera Excel formattato come quello della prof"""
+def generate_excel_report(analysis_results, rf, mrp):
+    """Genera Excel con AUTO-FIT delle colonne"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         
-        # Foglio 1: Sintesi (I Risultati)
-        summary_df.to_excel(writer, sheet_name="Sintesi Beta CAPM", index=False)
+        # Foglio Riepilogo
+        summary_data = []
+        for ticker, data in analysis_results.items():
+            summary_data.append({
+                "Ticker": ticker,
+                "Beta": data['stats']['Beta'],
+                "Covarianza": data['stats']['Covarianza'],
+                "Varianza Mkt": data['stats']['Varianza'],
+                "Rendimento Atteso (CAPM)": data['stats']['Exp Return']
+            })
+        pd.DataFrame(summary_data).to_excel(writer, sheet_name="Sintesi", index=False)
         
-        # Foglio 2: Dettaglio Storico (La tabella gigante)
-        # Formattiamo le colonne per renderle leggibili
-        detailed_df.to_excel(writer, sheet_name="Dati Storici Completi", index=False)
-        
-        # Foglio 3: Parametri
-        params = pd.DataFrame({"Parametro": ["Risk Free", "MRP", "Benchmark"], "Valore": [rf, mrp, benchmark_ticker]})
-        params.to_excel(writer, sheet_name="Parametri", index=False)
-        
-        # Formattazione colonne
-        for sheet in writer.sheets:
-            ws = writer.sheets[sheet]
-            for col in ws.columns:
-                try:
-                    ws.column_dimensions[col[0].column_letter].width = 15
-                except: pass
-
+        # Un Foglio per ogni Ticker
+        for ticker, data in analysis_results.items():
+            sheet_name = ticker.replace(".MI", "")[:30] 
+            
+            metrics_df = pd.DataFrame({
+                "METRICA": ["BETA", "COVARIANZA", "VARIANZA", "RISK FREE", "MRP", "CAPM RETURN"],
+                "VALORE": [
+                    data['stats']['Beta'],
+                    data['stats']['Covarianza'],
+                    data['stats']['Varianza'],
+                    rf,
+                    mrp,
+                    data['stats']['Exp Return']
+                ]
+            })
+            metrics_df.to_excel(writer, sheet_name=sheet_name, startrow=0, startcol=0, index=False)
+            data['df'].to_excel(writer, sheet_name=sheet_name, startrow=8)
+            
+        # ==========================================
+        # AUTO-ADJUST COLUMNS (Anti ####)
+        # ==========================================
+        for sheet_name in writer.sheets:
+            worksheet = writer.sheets[sheet_name]
+            for column in worksheet.columns:
+                max_length = 0
+                column_letter = column[0].column_letter # Ottiene la lettera (es. 'A', 'B')
+                
+                for cell in column:
+                    try:
+                        # Calcola lunghezza del contenuto della cella
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                
+                # Imposta larghezza = max_length + un po' di spazio extra
+                adjusted_width = (max_length + 2)
+                worksheet.column_dimensions[column_letter].width = adjusted_width
+            
     return output.getvalue()
 
 # =========================
 # LOGICA APP
 # =========================
 if st.button("🚀 Avvia Analisi", type="primary"):
-    with st.spinner('Scaricamento dati OHLCV e calcolo Covarianza...'):
-        raw_data = get_detailed_data(user_tickers, years_input)
+    with st.spinner('Elaborazione Side-by-Side in corso...'):
         
-        if not raw_data.empty:
-            df_results, returns_df, detailed_df = calculate_prof_metrics(raw_data, rf_input, mrp_input, years_input)
+        tickers = [t.strip() for t in user_tickers.split(',') if t.strip() != ""]
+        results = {}
+        
+        for t in tickers:
+            df_asset, df_bench = get_data_pair(t, benchmark_ticker, years_input)
             
-            st.session_state['results'] = df_results
-            st.session_state['detailed'] = detailed_df
+            if df_asset is not None and not df_asset.empty:
+                combined_df, stats = calculate_metrics_and_structure(df_asset, df_bench, rf_input, mrp_input, years_input)
+                results[t] = {
+                    "df": combined_df,
+                    "stats": stats
+                }
+        
+        if results:
+            st.session_state['analysis_results'] = results
             st.session_state['done'] = True
+        else:
+            st.error("Nessun dato trovato. Controlla i ticker.")
 
 if st.session_state.get('done'):
-    df_results = st.session_state['results']
-    detailed_df = st.session_state['detailed']
+    results = st.session_state['analysis_results']
     
-    st.subheader("📋 Risultati (Calcolo: Covarianza / Varianza)")
-    st.dataframe(df_results.style.format({
-        "Beta": "{:.4f}", 
-        "Covarianza": "{:.6f}", 
-        "Varianza Mkt": "{:.6f}",
-        "Rendimento Atteso (CAPM)": "{:.2f}%", 
-        "Rendimento Reale": "{:.2f}%"
-    }), use_container_width=True)
-
-    # Grafico veloce
-    col1, col2 = st.columns(2)
-    with col1:
-        fig = px.bar(df_results, x="Ticker", y="Beta", color="Natura", title="Beta", text_auto=True)
-        fig.add_hline(y=1, line_dash="dash")
-        st.plotly_chart(fig, use_container_width=True)
+    # Tabella Riepilogo a Video
+    summary_list = []
+    for t, data in results.items():
+        summary_list.append({
+            "Ticker": t,
+            "Beta": data['stats']['Beta'],
+            "CAPM Return": f"{data['stats']['Exp Return']*100:.2f}%"
+        })
     
-    with col2:
-        st.markdown("### Esempio Dati Scaricati (Simile Prof)")
-        # Mostriamo un'anteprima della tabella dettagliata (solo prime righe)
-        st.dataframe(detailed_df.head(10).style.format({
-            "Ultimo (Close)": "{:.2f}",
-            "Apertura": "{:.2f}",
-            "Var %": "{:.2f}%"
-        }), use_container_width=True)
+    st.subheader("📋 Sintesi Risultati")
+    st.dataframe(pd.DataFrame(summary_list), use_container_width=True)
+    
+    # Grafico Beta
+    st.subheader("Confronto Rischio (Beta)")
+    beta_df = pd.DataFrame(summary_list)
+    fig = px.bar(beta_df, x="Ticker", y="Beta", text_auto=".2f", title="Beta vs Mercato (1.0)")
+    fig.add_hline(y=1, line_dash="dash", annotation_text="Mercato")
+    st.plotly_chart(fig, use_container_width=True)
 
-    # Download
-    excel_file = generate_prof_excel(df_results, detailed_df, rf_input, mrp_input)
+    # Download Excel
+    excel_file = generate_excel_report(results, rf_input, mrp_input)
     st.download_button(
-        label="📥 Scarica Excel (Formato Prof)",
+        label="📥 Scarica Report Excel (Formattato)",
         data=excel_file,
-        file_name="Analisi_CAPM_Completa.xlsx",
+        file_name="Analisi_Finanziaria_Completa.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary"
     )
 
 # =========================
-# DOCUMENTAZIONE
+# RELAZIONE METODOLOGICA
 # =========================
 st.markdown("---")
-with st.expander("📖 Nota Metodologica (Confronto con metodo Prof)"):
+with st.expander("📚 Metodologia e Fonte Dati"):
     st.markdown(r"""
-    ### 1. Replica Esatta dei Dati
-    Il sistema scarica i dati settimanali includendo:
-    * **Prezzo Ultimo (Close):** Usato per il calcolo della variazione.
-    * **Apertura, Massimo, Minimo, Volumi:** Inclusi nel file Excel per completezza visiva (come da tabella di riferimento).
-
-    ### 2. Formula del Beta (Approccio Varianza/Covarianza)
-    Invece della regressione OLS, qui replichiamo il calcolo manuale di Excel:
+    ### 1. Struttura dei Dati
+    L'analisi scarica e processa le serie storiche **settimanali** (Weekly timeframe) per garantire significatività statistica su orizzonti di breve/medio periodo (2-5 anni).
+    
+    Il file Excel generato presenta, per ogni titolo, una struttura **Side-by-Side**:
+    * **Lato Sinistro:** Dati OHLCV (Open, High, Low, Close, Volume) e Rendimenti del Titolo selezionato.
+    * **Lato Destro:** Dati OHLCV e Rendimenti del Benchmark (**FTSE MIB**), allineati alla stessa data.
+    
+    ### 2. Calcolo dei Parametri di Rischio
+    Il coefficiente **Beta ($\beta$)** non è stimato tramite regressione OLS, ma calcolato esplicitamente attraverso il rapporto tra Covarianza e Varianza, replicando la metodologia classica dei fogli di calcolo finanziari:
+    
     $$ \beta = \frac{Cov(R_{asset}, R_{market})}{Var(R_{market})} $$
     
-    Dove:
-    * **Cov:** Covarianza tra i rendimenti del titolo e quelli del FTSE MIB.
-    * **Var:** Varianza dei rendimenti del FTSE MIB.
+    * **$R_{asset}$:** Variazione percentuale settimanale del titolo.
+    * **$R_{market}$:** Variazione percentuale settimanale del FTSE MIB.
     
-    ### 3. Rendimenti (Var %)
-    Viene utilizzata la variazione percentuale semplice, non logaritmica, per combaciare con la colonna "Var %" tipica dei fogli di calcolo finanziari di base:
-    $$ Var\% = \frac{P_t - P_{t-1}}{P_{t-1}} $$
+    ### 3. Parametri Macroeconomici (Fonti)
+    Per il calcolo del Costo del Capitale (CAPM), sono stati utilizzati i seguenti parametri standard:
+    
+    * **Risk-Free Rate ($R_f$):** Rendimento del **BTP Italia 10 Anni** (Default: ~3.8%). 
+      * *Motivazione:* Rappresenta l'alternativa di investimento priva di rischio per un investitore domestico italiano.
+    
+    * **Market Risk Premium ($MRP$):** Valore fissato al **5.5%**.
+      * *Fonte:* **Survey IESE Business School (Pablo Fernandez, 2025)**. Questo valore rappresenta la media del consensus di analisti e accademici per il premio per il rischio azionario in Italia.
     """)
