@@ -123,19 +123,25 @@ def calculate_metrics_and_structure(df_asset, df_bench, rf, mrp, years):
     return df_asset, df_bench, stats
 
 def generate_excel_report(analysis_results, rf, mrp):
-    """Genera Excel con SPATIUM tra le tabelle e Header"""
+    """Genera Excel con formattazione % e SPAZIATURA"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        
+        # --- Helper per formattare in % ---
+        def fmt_pct(val):
+            """Converte 0.05123 in '5.123%'"""
+            if pd.isna(val): return ""
+            return f"{val * 100:.3f}%"
         
         # Foglio Riepilogo
         summary_data = []
         for ticker, data in analysis_results.items():
             summary_data.append({
                 "Ticker": ticker,
-                "Beta": data['stats']['Beta'],
-                "Covarianza": data['stats']['Covarianza'],
-                "Varianza Mkt": data['stats']['Varianza'],
-                "Rendimento Atteso (CAPM)": data['stats']['Exp Return']
+                "Beta": f"{data['stats']['Beta']:.3f}",
+                "Covarianza": f"{data['stats']['Covarianza']:.6f}",
+                "Varianza Mkt": f"{data['stats']['Varianza']:.6f}",
+                "Rendimento Atteso (CAPM)": fmt_pct(data['stats']['Exp Return'])
             })
         pd.DataFrame(summary_data).to_excel(writer, sheet_name="Sintesi", index=False)
         
@@ -143,39 +149,51 @@ def generate_excel_report(analysis_results, rf, mrp):
         for ticker, data in analysis_results.items():
             sheet_name = ticker.replace(".MI", "")[:30] 
             
-            # 1. Scriviamo le Metriche in alto (Righe 0-6)
+            # --- 1. Preparazione Metriche in Alto ---
+            # Applichiamo la formattazione % solo dove serve
+            risk_free_fmt = fmt_pct(rf)
+            mrp_fmt = fmt_pct(mrp)
+            capm_fmt = fmt_pct(data['stats']['Exp Return'])
+            
             metrics_df = pd.DataFrame({
                 "METRICA": ["BETA", "COVARIANZA", "VARIANZA", "RISK FREE", "MRP", "CAPM RETURN"],
                 "VALORE": [
-                    data['stats']['Beta'],
-                    data['stats']['Covarianza'],
-                    data['stats']['Varianza'],
-                    rf,
-                    mrp,
-                    data['stats']['Exp Return']
+                    f"{data['stats']['Beta']:.4f}",
+                    f"{data['stats']['Covarianza']:.6f}",
+                    f"{data['stats']['Varianza']:.6f}",
+                    risk_free_fmt,
+                    mrp_fmt,
+                    capm_fmt
                 ]
             })
             metrics_df.to_excel(writer, sheet_name=sheet_name, startrow=0, startcol=0, index=False)
             
-            # Recuperiamo l'oggetto worksheet per scrivere celle singole
+            # --- 2. Preparazione Dati Storici (Formattazione Colonne) ---
+            # Creiamo copie per non rovinare i dati originali in session_state
+            df_asset_view = data['df_asset'].copy()
+            df_bench_view = data['df_bench'].copy()
+            
+            # Formattiamo le colonne percentuali
+            cols_to_format = ["Var %", "Rendimento %"]
+            
+            for col in cols_to_format:
+                if col in df_asset_view.columns:
+                    df_asset_view[col] = df_asset_view[col].apply(fmt_pct)
+                if col in df_bench_view.columns:
+                    df_bench_view[col] = df_bench_view[col].apply(fmt_pct)
+
+            # Recuperiamo l'oggetto worksheet
             workbook = writer.book
             worksheet = writer.sheets[sheet_name]
             
-            # --- BLOCCO SINISTRO (ASSET) ---
-            # Header Ticker (Riga 8 -> Excel 9)
+            # --- SCRITTURA BLOCCO SINISTRO (ASSET) ---
             worksheet.cell(row=9, column=1, value=ticker) 
-            # Dati Asset (Riga 9 -> Excel 10)
-            data['df_asset'].to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=0)
+            df_asset_view.to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=0)
             
-            # --- BLOCCO DESTRO (MERCATO) ---
-            # Calcoliamo l'offset: Colonne Asset + Indice + 2 Colonne vuote
-            # len(columns) non conta l'indice, quindi aggiungiamo 1 per l'indice (Data) + 2 di spazio
-            offset = len(data['df_asset'].columns) + 1 + 2
-            
-            # Header Mercato
+            # --- SCRITTURA BLOCCO DESTRO (MERCATO) ---
+            offset = len(df_asset_view.columns) + 1 + 2 # +1 Index, +2 Spazio
             worksheet.cell(row=9, column=offset + 1, value="FTSE MIB (Benchmark)")
-            # Dati Mercato
-            data['df_bench'].to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=offset)
+            df_bench_view.to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=offset)
             
         # ==========================================
         # AUTO-ADJUST COLUMNS (Anti ####)
@@ -194,7 +212,6 @@ def generate_excel_report(analysis_results, rf, mrp):
                         pass
                 
                 adjusted_width = (max_length + 2)
-                # Mettiamo un minimo di 12 per sicurezza
                 if adjusted_width < 12: adjusted_width = 12
                 worksheet.column_dimensions[column_letter].width = adjusted_width
             
@@ -213,7 +230,6 @@ if st.button("🚀 Avvia Analisi", type="primary"):
             df_asset, df_bench = get_data_pair(t, benchmark_ticker, years_input)
             
             if df_asset is not None and not df_asset.empty:
-                # Ora la funzione restituisce 3 oggetti
                 df_a, df_b, stats = calculate_metrics_and_structure(df_asset, df_bench, rf_input, mrp_input, years_input)
                 results[t] = {
                     "df_asset": df_a,
@@ -252,7 +268,7 @@ if st.session_state.get('done'):
     # Download Excel
     excel_file = generate_excel_report(results, rf_input, mrp_input)
     st.download_button(
-        label="📥 Scarica Report Excel (Struttura Completa)",
+        label="📥 Scarica Report Excel (Formattato)",
         data=excel_file,
         file_name="Analisi_Finanziaria_Completa.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
