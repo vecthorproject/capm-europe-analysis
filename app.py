@@ -2,279 +2,255 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import statsmodels.api as sm
 import plotly.express as px
 import io 
 
 # =========================
 # CONFIGURAZIONE PAGINA
 # =========================
-st.set_page_config(page_title="CAPM Analysis Europe", layout="wide")
+st.set_page_config(page_title="Analisi Beta & CAPM (Metodo Prof)", layout="wide")
 
-st.title("📊 CAPM Analysis: European Indices")
+st.title("📊 Analisi Beta & CAPM (Metodo Classico)")
 st.markdown("""
-Questa applicazione calcola il **Costo del Capitale (CAPM)** e confronta i rendimenti attesi con quelli effettivi 
-per i principali indici europei.
-* **Metodologia:** Dati storici (Yahoo Finance) + Regressione OLS.
-* **Parametri:** Basati su Survey Fernandez 2025 (modificabili).
+Replica esatta della metodologia basata su:
+* **Dati Completi:** Apertura, Massimo, Minimo, Chiusura, Volume.
+* **Calcolo:** Variazione Percentuale Semplice (Var %).
+* **Formula Beta:** Rapporto tra Covarianza e Varianza.
 """)
 
 # =========================
-# SIDEBAR - PARAMETRI UTENTE
+# SIDEBAR - PARAMETRI
 # =========================
-st.sidebar.header("⚙️ Parametri Modello")
+st.sidebar.header("⚙️ Input Dati")
 
-rf_input = st.sidebar.number_input("Risk Free Rate (Bund 10Y)", value=2.5, step=0.1) / 100
-mrp_input = st.sidebar.number_input("Market Risk Premium (Fernandez)", value=5.8, step=0.1) / 100
-years_input = st.sidebar.slider("Orizzonte Temporale (Anni)", 3, 10, 5)
+default_tickers = "ENEL.MI, ISP.MI, ENI.MI"
+user_tickers = st.sidebar.text_area("Inserisci Ticker (es. ENEL.MI)", default_tickers, height=100)
+benchmark_ticker = "FTSEMIB.MI"
 
 st.sidebar.markdown("---")
-st.sidebar.info("Clicca su **'Avvia Analisi'** per aggiornare i dati.")
+st.sidebar.header("Parametri CAPM")
+rf_input = st.sidebar.number_input("Risk Free Rate (BTP 10Y)", value=3.8, step=0.1) / 100
+mrp_input = st.sidebar.number_input("Market Risk Premium", value=5.5, step=0.1) / 100
+years_input = st.sidebar.slider("Orizzonte Temporale (Anni)", 1, 5, 2) 
+
+st.sidebar.info("Clicca **Avvia Analisi** per generare il report.")
 
 # =========================
-# FUNZIONI DI CALCOLO
+# FUNZIONI (MOTORE PROF)
 # =========================
+
 @st.cache_data
-def get_data(years):
-    """Scarica i dati da Yahoo Finance"""
-    tickers = ["^GDAXI", "^FCHI", "^IBEX", "FTSEMIB.MI", "^STOXX50E"]
+def get_detailed_data(ticker_string, years):
+    """Scarica dati OHLCV completi per replica tabella prof"""
+    tickers = [t.strip() for t in ticker_string.split(',') if t.strip() != ""]
+    if benchmark_ticker not in tickers:
+        tickers.append(benchmark_ticker)
+    
     try:
-        data = yf.download(tickers, period=f"{years}y", interval="1mo", auto_adjust=True, progress=False)
-        if isinstance(data.columns, pd.MultiIndex):
-            try:
-                close = data["Close"]
-            except KeyError:
-                close = data.iloc[:, data.columns.get_level_values(0) == 'Close']
-                close.columns = close.columns.droplevel(0)
-        else:
-            close = data["Close"]
-        return close.dropna()
+        # Scarichiamo tutto (Open, High, Low, Close, Volume)
+        data = yf.download(tickers, period=f"{years}y", interval="1wk", auto_adjust=False, progress=False)
+        return data
     except Exception as e:
-        st.error(f"Errore download dati: {e}")
+        st.error(f"Errore download: {e}")
         return pd.DataFrame()
 
-def calculate_capm(close_data, rf, mrp, years):
-    """Esegue i calcoli CAPM e Regressione"""
-    log_returns = np.log(close_data / close_data.shift(1)).dropna()
-    market_index = "^STOXX50E"
+def calculate_prof_metrics(data, rf, mrp, years):
+    """Calcola Beta usando Covarianza/Varianza e Var % Semplice"""
     
-    market_returns = log_returns[market_index]
-    asset_returns = log_returns.drop(columns=market_index)
+    # 1. Estrazione e Pulizia Prezzi di Chiusura (Adj Close per i calcoli reali, Close per tabella)
+    # Nota: Per replicare la prof usiamo 'Close' o 'Adj Close'. Solitamente Yahoo da Adj Close di default.
+    # Usiamo 'Close' puro se vogliamo replicare i prezzi che vede a video, ma 'Adj Close' è finanziariamente corretto.
+    # Per coerenza con la tabella "DataUltimo", usiamo Close.
+    
+    try:
+        # Gestione colonne MultiIndex di yfinance
+        closes = data["Close"] 
+        opens = data["Open"]
+        highs = data["High"]
+        lows = data["Low"]
+        vols = data["Volume"]
+    except KeyError:
+        st.error("Errore nella struttura dei dati scaricati.")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    # 2. Calcolo Variazione Percentuale (Var %) - Metodo Semplice
+    # Formula: (Prezzo_t - Prezzo_t-1) / Prezzo_t-1
+    returns = closes.pct_change().dropna()
+    
+    if benchmark_ticker not in returns.columns:
+        st.error("Benchmark mancante.")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    market_ret = returns[benchmark_ticker]
     
     results_list = []
     
-    for asset in asset_returns.columns:
-        Y = asset_returns[asset]
-        X = sm.add_constant(market_returns)
-        model = sm.OLS(Y, X).fit()
+    # Creiamo anche un DataFrame gigante per l'Excel dettagliato
+    detailed_export = pd.DataFrame()
+
+    for asset in returns.columns:
+        if asset == benchmark_ticker:
+            continue
+            
+        asset_ret = returns[asset]
         
-        beta = model.params.iloc[1]
-        r_sq = model.rsquared
-        p_value = model.pvalues.iloc[1]
+        # Allineamento dati (intersezione date)
+        common_idx = asset_ret.index.intersection(market_ret.index)
+        y = asset_ret.loc[common_idx]
+        x = market_ret.loc[common_idx]
         
+        # --- IL CUORE DEL CALCOLO (METODO PROF) ---
+        # Covarianza (Asset, Mercato)
+        covariance = np.cov(y, x)[0][1]
+        # Varianza (Mercato)
+        variance = np.var(x, ddof=1) # ddof=1 per varianza campionaria (Excel VAR.S)
+        
+        # Beta = Cov / Var
+        beta = covariance / variance
+        # ------------------------------------------
+        
+        # Classificazione
         if beta < 0.8: natura = "Riduttivo (Strong)"
         elif beta < 1: natura = "Riduttivo (Mod.)"
         elif beta < 1.2: natura = "Amplificativo (Mod.)"
         else: natura = "Amplificativo (Aggr.)"
-        
+
+        # CAPM & Performance
         expected_return = rf + beta * mrp
-        start_p = close_data[asset].iloc[0]
-        end_p = close_data[asset].iloc[-1]
+        
+        start_p = closes[asset].iloc[0]
+        end_p = closes[asset].iloc[-1]
+        # CAGR Semplice
         realized_return = (end_p / start_p) ** (1 / years) - 1
         deviation = realized_return - expected_return
         
         results_list.append({
             "Ticker": asset,
             "Beta": round(beta, 3),
-            "Natura Rischio": natura,
-            "R²": round(r_sq, 3),
-            "P-Value": round(p_value, 4),
-            "Exp. Return (CAPM)": round(expected_return * 100, 2),
-            "Realized Return": round(realized_return * 100, 2),
-            "Delta (Alpha)": round(deviation * 100, 2)
+            "Covarianza": covariance, # Dato Prof
+            "Varianza Mkt": variance, # Dato Prof
+            "Natura": natura,
+            "Rendimento Atteso (CAPM)": round(expected_return * 100, 2),
+            "Rendimento Reale": round(realized_return * 100, 2),
+            "Delta": round(deviation * 100, 2)
         })
-        
-    return pd.DataFrame(results_list), log_returns
 
-def generate_excel(df_results, close_data, log_returns, rf, mrp):
-    """Genera il file Excel in memoria"""
+        # --- PREPARAZIONE DATI PER EXCEL DETTAGLIATO (Replica Tabella) ---
+        # Creiamo un blocco per questo ticker
+        temp_df = pd.DataFrame({
+            "Data": closes.index,
+            "Ticker": asset,
+            "Apertura": opens[asset],
+            "Massimo": highs[asset],
+            "Minimo": lows[asset],
+            "Ultimo (Close)": closes[asset],
+            "Volume": vols[asset],
+            "Var %": returns[asset] * 100 # In formato percentuale leggibile
+        }).sort_index(ascending=False) # Dal più recente al più vecchio come la prof
+        
+        detailed_export = pd.concat([detailed_export, temp_df])
+
+    return pd.DataFrame(results_list), returns, detailed_export
+
+def generate_prof_excel(summary_df, detailed_df, rf, mrp):
+    """Genera Excel formattato come quello della prof"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_results.to_excel(writer, sheet_name="Analisi CAPM", index=False)
-        close_data.to_excel(writer, sheet_name="Prezzi Storici")
-        log_returns.to_excel(writer, sheet_name="Rendimenti Log")
         
-        params_df = pd.DataFrame({
-            "Parametro": ["Risk Free Rate", "Market Risk Premium", "Benchmark"],
-            "Valore": [f"{rf*100}%", f"{mrp*100}%", "STOXX Europe 50"]
-        })
-        params_df.to_excel(writer, sheet_name="Parametri", index=False)
+        # Foglio 1: Sintesi (I Risultati)
+        summary_df.to_excel(writer, sheet_name="Sintesi Beta CAPM", index=False)
         
-        for sheet_name in writer.sheets:
-            worksheet = writer.sheets[sheet_name]
-            for column in worksheet.columns:
-                max_length = 0
-                column_letter = column[0].column_letter
-                for cell in column:
-                    try:
-                        if len(str(cell.value)) > max_length:
-                            max_length = len(str(cell.value))
-                    except:
-                        pass
-                worksheet.column_dimensions[column_letter].width = max_length + 3
-                
+        # Foglio 2: Dettaglio Storico (La tabella gigante)
+        # Formattiamo le colonne per renderle leggibili
+        detailed_df.to_excel(writer, sheet_name="Dati Storici Completi", index=False)
+        
+        # Foglio 3: Parametri
+        params = pd.DataFrame({"Parametro": ["Risk Free", "MRP", "Benchmark"], "Valore": [rf, mrp, benchmark_ticker]})
+        params.to_excel(writer, sheet_name="Parametri", index=False)
+        
+        # Formattazione colonne
+        for sheet in writer.sheets:
+            ws = writer.sheets[sheet]
+            for col in ws.columns:
+                try:
+                    ws.column_dimensions[col[0].column_letter].width = 15
+                except: pass
+
     return output.getvalue()
 
 # =========================
-# MAIN APP LOGIC (Gestione Stato)
+# LOGICA APP
 # =========================
-
-# 1. Se clicco il bottone, faccio i calcoli e SALVO nello stato
 if st.button("🚀 Avvia Analisi", type="primary"):
-    with st.spinner('Elaborazione in corso...'):
-        close_df = get_data(years_input)
-        if not close_df.empty:
-            df_results, log_returns = calculate_capm(close_df, rf_input, mrp_input, years_input)
-            
-            # Salvo tutto nella "memoria" della sessione
-            st.session_state['df_results'] = df_results
-            st.session_state['close_df'] = close_df
-            st.session_state['log_returns'] = log_returns
-            st.session_state['analysis_done'] = True
-
-# 2. Controllo se ho i dati in memoria (così rimangono anche dopo il refresh del download)
-if st.session_state.get('analysis_done'):
-    
-    # Recupero i dati dalla memoria
-    df_results = st.session_state['df_results']
-    close_df = st.session_state['close_df']
-    log_returns = st.session_state['log_returns']
-
-    # --- MOSTRA RISULTATI ---
-    st.subheader("📋 Risultati Analisi")
-    st.dataframe(df_results.style.format({
-        "Beta": "{:.3f}",
-        "R²": "{:.3f}",
-        "P-Value": "{:.4f}",
-        "Exp. Return (CAPM)": "{:.2f}%",
-        "Realized Return": "{:.2f}%",
-        "Delta (Alpha)": "{:.2f}%"
-    }), use_container_width=True)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Esposizione al Rischio (Beta)")
-        fig_beta = px.bar(df_results, x="Ticker", y="Beta", color="Natura Rischio",
-                          title="Beta vs Mercato (1.0)", text_auto=True)
-        fig_beta.add_hline(y=1, line_dash="dash", annotation_text="Mercato")
-        st.plotly_chart(fig_beta, use_container_width=True)
+    with st.spinner('Scaricamento dati OHLCV e calcolo Covarianza...'):
+        raw_data = get_detailed_data(user_tickers, years_input)
         
-    with col2:
-        st.subheader("Confronto Rendimenti")
-        df_melted = df_results.melt(id_vars="Ticker", 
-                                    value_vars=["Exp. Return (CAPM)", "Realized Return"],
-                                    var_name="Tipo", value_name="Valore %")
-        fig_returns = px.bar(df_melted, x="Ticker", y="Valore %", color="Tipo", barmode="group",
-                             title="Atteso vs Reale", text_auto=True)
-        st.plotly_chart(fig_returns, use_container_width=True)
+        if not raw_data.empty:
+            df_results, returns_df, detailed_df = calculate_prof_metrics(raw_data, rf_input, mrp_input, years_input)
+            
+            st.session_state['results'] = df_results
+            st.session_state['detailed'] = detailed_df
+            st.session_state['done'] = True
 
-    # --- DOWNLOAD BUTTON ---
-    # Genero il file Excel usando i dati attuali
-    excel_data = generate_excel(df_results, close_df, log_returns, rf_input, mrp_input)
+if st.session_state.get('done'):
+    df_results = st.session_state['results']
+    detailed_df = st.session_state['detailed']
     
-    st.success("Analisi completata!")
+    st.subheader("📋 Risultati (Calcolo: Covarianza / Varianza)")
+    st.dataframe(df_results.style.format({
+        "Beta": "{:.4f}", 
+        "Covarianza": "{:.6f}", 
+        "Varianza Mkt": "{:.6f}",
+        "Rendimento Atteso (CAPM)": "{:.2f}%", 
+        "Rendimento Reale": "{:.2f}%"
+    }), use_container_width=True)
+
+    # Grafico veloce
+    col1, col2 = st.columns(2)
+    with col1:
+        fig = px.bar(df_results, x="Ticker", y="Beta", color="Natura", title="Beta", text_auto=True)
+        fig.add_hline(y=1, line_dash="dash")
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        st.markdown("### Esempio Dati Scaricati (Simile Prof)")
+        # Mostriamo un'anteprima della tabella dettagliata (solo prime righe)
+        st.dataframe(detailed_df.head(10).style.format({
+            "Ultimo (Close)": "{:.2f}",
+            "Apertura": "{:.2f}",
+            "Var %": "{:.2f}%"
+        }), use_container_width=True)
+
+    # Download
+    excel_file = generate_prof_excel(df_results, detailed_df, rf_input, mrp_input)
     st.download_button(
-        label="📥 Scarica Report Excel (.xlsx)",
-        data=excel_data,
-        file_name="CAPM_Analysis_Professional.xlsx",
+        label="📥 Scarica Excel (Formato Prof)",
+        data=excel_file,
+        file_name="Analisi_CAPM_Completa.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary"
     )
-    
+
 # =========================
-# SEZIONE DOCUMENTAZIONE (DA AGGIUNGERE ALLA FINE DEL FILE)
+# DOCUMENTAZIONE
 # =========================
 st.markdown("---")
-st.header("📚 Documentazione del Progetto")
+with st.expander("📖 Nota Metodologica (Confronto con metodo Prof)"):
+    st.markdown(r"""
+    ### 1. Replica Esatta dei Dati
+    Il sistema scarica i dati settimanali includendo:
+    * **Prezzo Ultimo (Close):** Usato per il calcolo della variazione.
+    * **Apertura, Massimo, Minimo, Volumi:** Inclusi nel file Excel per completezza visiva (come da tabella di riferimento).
 
-with st.expander("📖 Leggi la Relazione Completa (Scopo, Metodologia e Codice)"):
-    st.markdown("""
-    ### 1. Scopo del Progetto
-    L'obiettivo di questo applicativo è condurre una **verifica empirica ex-post** della teoria finanziaria moderna, mettendo a confronto il modello teorico (CAPM) con la realtà dei mercati azionari europei.
+    ### 2. Formula del Beta (Approccio Varianza/Covarianza)
+    Invece della regressione OLS, qui replichiamo il calcolo manuale di Excel:
+    $$ \beta = \frac{Cov(R_{asset}, R_{market})}{Var(R_{market})} $$
     
-    In particolare, il progetto risponde a tre domande fondamentali:
-    1.  **Quanto sono rischiosi** i singoli mercati nazionali (Italia, Germania, Francia, Spagna) rispetto alla media europea?
-    2.  **Quale rendimento avrebbero dovuto offrire** teoricamente per compensare tale rischio?
-    3.  **Hanno effettivamente pagato** quel rendimento negli ultimi 5 anni?
+    Dove:
+    * **Cov:** Covarianza tra i rendimenti del titolo e quelli del FTSE MIB.
+    * **Var:** Varianza dei rendimenti del FTSE MIB.
     
-    ---
-
-    ### 2. Flusso di Lavoro (Pipeline)
-    L'analisi segue un processo strutturato in 4 fasi automatiche:
-    
-    1.  **Data Ingestion:** Il sistema scarica in tempo reale i prezzi di chiusura *adjusted* (rettificati per dividendi e split) da Yahoo Finance per gli ultimi 5 anni.
-    2.  **Risk Assessment (Beta):** Viene calcolata la sensibilità di ogni indice nazionale rispetto al benchmark europeo (`^STOXX50E`) tramite regressione lineare.
-    3.  **Pricing (CAPM):** Utilizzando parametri accademici (Risk Free e Market Premium), si calcola il "Prezzo del Rischio", ovvero il rendimento minimo atteso.
-    4.  **Performance Evaluation:** Si confronta l'attesa con la realtà (CAGR effettivo) per determinare l'Alpha (extra-rendimento) o la sottoperformance.
-
-    ---
-
-    ### 3. Razionale Metodologico (Scelta dei Parametri)
-    Per garantire rigore scientifico, i parametri di input non sono arbitrari ma derivano da standard accademici:
-    
-    * **Risk-Free Rate ($R_f$):** Viene utilizzato il rendimento del **Bund Tedesco a 10 anni** (approssimato al 2.5%). Rappresenta l'investimento privo di rischio nell'Eurozona, evitando le distorsioni legate allo spread dei titoli periferici (es. BTP).
-    * **Market Risk Premium ($R_m - R_f$):** Il premio per il rischio è fissato al **5.8%**, basandosi sulla **Survey 2025 di Pablo Fernandez (IESE Business School)**, la fonte più autorevole per il consensus di analisti e accademici.
-    * **Orizzonte Temporale:** 5 anni con dati mensili ($N=60$). La frequenza mensile è preferita a quella giornaliera per eliminare il "rumore" statistico di breve termine e stabilizzare la stima del Beta.
-
-    ---
-    
-    ### 4. Spiegazione del Codice e Logica Matematica
-    Di seguito viene analizzato il funzionamento del "motore" Python sottostante.
-
-    #### A. Calcolo dei Rendimenti Logaritmici
+    ### 3. Rendimenti (Var %)
+    Viene utilizzata la variazione percentuale semplice, non logaritmica, per combaciare con la colonna "Var %" tipica dei fogli di calcolo finanziari di base:
+    $$ Var\% = \frac{P_t - P_{t-1}}{P_{t-1}} $$
     """)
-    
-    st.code("""
-log_returns = np.log(close_data / close_data.shift(1)).dropna()
-    """, language='python')
-    
-    st.markdown("""
-    **Perché:** In finanza quantitativa si usano i rendimenti logaritmici (o *log-returns*) invece di quelli semplici perché sono additivi nel tempo e seguono meglio una distribuzione normale, requisito fondamentale per la regressione lineare.
-    """)
-
-    st.markdown("#### B. Calcolo del Beta (Regressione Lineare)")
-    st.code("""
-# Y = Asset (es. FTSEMIB), X = Mercato (STOXX50)
-model = sm.OLS(Y, X).fit()
-beta = model.params.iloc[1]
-    """, language='python')
-    
-    st.markdown("""
-    **Cosa succede:** Utilizziamo la libreria `statsmodels` per eseguire una regressione **OLS (Ordinary Least Squares)**. 
-    Il **Beta ($\beta$)** rappresenta la pendenza della retta di regressione:
-    * $\beta > 1$: L'indice è **Amplificativo** (Aggressivo).
-    * $\beta < 1$: L'indice è **Riduttivo** (Difensivo).
-    """)
-
-    st.markdown("#### C. Formula del CAPM (Rendimento Atteso)")
-    st.latex(r'''
-    E(R_i) = R_f + \beta_i \times (R_m - R_f)
-    ''')
-    st.markdown("""
-    Il codice applica questa formula per stabilire il rendimento teorico "giusto" dato il livello di rischio.
-    """)
-
-    st.markdown("#### D. Confronto con la Realtà (Rendimento Effettivo)")
-    st.code("""
-realized_return = (end_p / start_p) ** (1 / years) - 1
-deviation = realized_return - expected_return
-    """, language='python')
-    
-    st.markdown("""
-    **Il Delta (Alpha Proxy):** Infine, calcoliamo il rendimento reale composto annualizzato (**CAGR**) e lo sottraiamo al rendimento atteso CAPM.
-    * **Delta Positivo:** Il mercato ha sovraperformato le attese teoriche.
-    * **Delta Negativo:** Il rischio assunto non è stato remunerato adeguatamente dal mercato.
-    """)
-    
-    st.info("Questa architettura garantisce che i risultati siano basati su dati reali e metodologie trasparenti, permettendo una verifica istantanea delle ipotesi di mercato.")
