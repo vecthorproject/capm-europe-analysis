@@ -83,7 +83,7 @@ def get_data_pair(ticker, benchmark, years):
         return None, None
 
 def calculate_metrics_and_structure(df_asset, df_bench, rf, mrp, years):
-    """Calcola Beta, Var% e struttura il DataFrame finale"""
+    """Calcola Beta, Var% e prepara i dati separati"""
     
     # 1. Calcolo Variazione % (Rendimento Semplice)
     df_asset["Var %"] = df_asset["Ultimo"].pct_change()
@@ -112,12 +112,6 @@ def calculate_metrics_and_structure(df_asset, df_bench, rf, mrp, years):
     # 3. Parametri CAPM
     expected_return = rf + beta * mrp
     
-    # 4. Preparazione Dati per Excel (Side-by-Side)
-    asset_cols = df_asset.add_suffix(" (Asset)")
-    bench_cols = df_bench.add_suffix(" (Mkt)")
-    
-    combined_df = pd.concat([asset_cols, bench_cols], axis=1)
-    
     stats = {
         "Beta": beta,
         "Covarianza": covariance,
@@ -125,10 +119,11 @@ def calculate_metrics_and_structure(df_asset, df_bench, rf, mrp, years):
         "Exp Return": expected_return
     }
     
-    return combined_df, stats
+    # Restituiamo i due dataframe separati per gestirli meglio nell'Excel
+    return df_asset, df_bench, stats
 
 def generate_excel_report(analysis_results, rf, mrp):
-    """Genera Excel con AUTO-FIT delle colonne"""
+    """Genera Excel con SPATIUM tra le tabelle e Header"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         
@@ -148,6 +143,7 @@ def generate_excel_report(analysis_results, rf, mrp):
         for ticker, data in analysis_results.items():
             sheet_name = ticker.replace(".MI", "")[:30] 
             
+            # 1. Scriviamo le Metriche in alto (Righe 0-6)
             metrics_df = pd.DataFrame({
                 "METRICA": ["BETA", "COVARIANZA", "VARIANZA", "RISK FREE", "MRP", "CAPM RETURN"],
                 "VALORE": [
@@ -160,7 +156,26 @@ def generate_excel_report(analysis_results, rf, mrp):
                 ]
             })
             metrics_df.to_excel(writer, sheet_name=sheet_name, startrow=0, startcol=0, index=False)
-            data['df'].to_excel(writer, sheet_name=sheet_name, startrow=8)
+            
+            # Recuperiamo l'oggetto worksheet per scrivere celle singole
+            workbook = writer.book
+            worksheet = writer.sheets[sheet_name]
+            
+            # --- BLOCCO SINISTRO (ASSET) ---
+            # Header Ticker (Riga 8 -> Excel 9)
+            worksheet.cell(row=9, column=1, value=ticker) 
+            # Dati Asset (Riga 9 -> Excel 10)
+            data['df_asset'].to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=0)
+            
+            # --- BLOCCO DESTRO (MERCATO) ---
+            # Calcoliamo l'offset: Colonne Asset + Indice + 2 Colonne vuote
+            # len(columns) non conta l'indice, quindi aggiungiamo 1 per l'indice (Data) + 2 di spazio
+            offset = len(data['df_asset'].columns) + 1 + 2
+            
+            # Header Mercato
+            worksheet.cell(row=9, column=offset + 1, value="FTSE MIB (Benchmark)")
+            # Dati Mercato
+            data['df_bench'].to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=offset)
             
         # ==========================================
         # AUTO-ADJUST COLUMNS (Anti ####)
@@ -169,18 +184,18 @@ def generate_excel_report(analysis_results, rf, mrp):
             worksheet = writer.sheets[sheet_name]
             for column in worksheet.columns:
                 max_length = 0
-                column_letter = column[0].column_letter # Ottiene la lettera (es. 'A', 'B')
+                column_letter = column[0].column_letter
                 
                 for cell in column:
                     try:
-                        # Calcola lunghezza del contenuto della cella
                         if len(str(cell.value)) > max_length:
                             max_length = len(str(cell.value))
                     except:
                         pass
                 
-                # Imposta larghezza = max_length + un po' di spazio extra
                 adjusted_width = (max_length + 2)
+                # Mettiamo un minimo di 12 per sicurezza
+                if adjusted_width < 12: adjusted_width = 12
                 worksheet.column_dimensions[column_letter].width = adjusted_width
             
     return output.getvalue()
@@ -198,9 +213,11 @@ if st.button("🚀 Avvia Analisi", type="primary"):
             df_asset, df_bench = get_data_pair(t, benchmark_ticker, years_input)
             
             if df_asset is not None and not df_asset.empty:
-                combined_df, stats = calculate_metrics_and_structure(df_asset, df_bench, rf_input, mrp_input, years_input)
+                # Ora la funzione restituisce 3 oggetti
+                df_a, df_b, stats = calculate_metrics_and_structure(df_asset, df_bench, rf_input, mrp_input, years_input)
                 results[t] = {
-                    "df": combined_df,
+                    "df_asset": df_a,
+                    "df_bench": df_b,
                     "stats": stats
                 }
         
@@ -235,7 +252,7 @@ if st.session_state.get('done'):
     # Download Excel
     excel_file = generate_excel_report(results, rf_input, mrp_input)
     st.download_button(
-        label="📥 Scarica Report Excel (Formattato)",
+        label="📥 Scarica Report Excel (Struttura Completa)",
         data=excel_file,
         file_name="Analisi_Finanziaria_Completa.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -251,24 +268,25 @@ with st.expander("📚 Metodologia e Fonte Dati"):
     ### 1. Struttura dei Dati
     L'analisi scarica e processa le serie storiche **settimanali** (Weekly timeframe) per garantire significatività statistica su orizzonti di breve/medio periodo (2-5 anni).
     
-    Il file Excel generato presenta, per ogni titolo, una struttura **Side-by-Side**:
-    * **Lato Sinistro:** Dati OHLCV (Open, High, Low, Close, Volume) e Rendimenti del Titolo selezionato.
-    * **Lato Destro:** Dati OHLCV e Rendimenti del Benchmark (**FTSE MIB**), allineati alla stessa data.
+    Il file Excel generato presenta, per ogni titolo, una struttura **Side-by-Side** separata da due colonne vuote:
+    * **Lato Sinistro:** Intestato col nome del Ticker. Contiene Dati OHLCV e Rendimenti.
+    * **Lato Destro:** Intestato "FTSE MIB (Benchmark)". Contiene Dati OHLCV e Rendimenti del mercato.
     
     ### 2. Calcolo dei Parametri di Rischio
-    Il coefficiente **Beta ($\beta$)** non è stimato tramite regressione OLS, ma calcolato esplicitamente attraverso il rapporto tra Covarianza e Varianza, replicando la metodologia classica dei fogli di calcolo finanziari:
+    Il coefficiente **Beta ($\beta$)** è calcolato esplicitamente attraverso il rapporto tra Covarianza e Varianza:
     
     $$ \beta = \frac{Cov(R_{asset}, R_{market})}{Var(R_{market})} $$
     
     * **$R_{asset}$:** Variazione percentuale settimanale del titolo.
     * **$R_{market}$:** Variazione percentuale settimanale del FTSE MIB.
     
-    ### 3. Parametri Macroeconomici (Fonti)
-    Per il calcolo del Costo del Capitale (CAPM), sono stati utilizzati i seguenti parametri standard:
+    ### 3. Significato del CAPM Return
+    Il valore indicato come "CAPM Return" (o Rendimento Atteso) indica il rendimento teorico annuo specifico per quel titolo, calcolato come:
     
-    * **Risk-Free Rate ($R_f$):** Rendimento del **BTP Italia 10 Anni** (Default: ~3.8%). 
-      * *Motivazione:* Rappresenta l'alternativa di investimento priva di rischio per un investitore domestico italiano.
+    $$ E(R) = R_f + \beta \times (R_m - R_f) $$
     
-    * **Market Risk Premium ($MRP$):** Valore fissato al **5.5%**.
-      * *Fonte:* **Survey IESE Business School (Pablo Fernandez, 2025)**. Questo valore rappresenta la media del consensus di analisti e accademici per il premio per il rischio azionario in Italia.
+    Esso risponde alla domanda: *"Quanto dovrebbe rendere questo titolo per compensare il rischio specifico (Beta) che sto assumendo rispetto a un BTP?"*.
+    
+    * **Risk-Free Rate ($R_f$):** BTP Italia 10 Anni (Default: ~3.8%). 
+    * **Market Risk Premium ($MRP$):** 5.5% (Survey IESE Pablo Fernandez, 2025).
     """)
