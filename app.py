@@ -15,7 +15,7 @@ st.set_page_config(page_title="Analisi Beta Pro", layout="wide")
 st.title("🇪🇺 Analisi Finanziaria: Focus Europa & Italia")
 st.markdown("""
 Strumento professionale per il calcolo del **Beta** e del **Costo del Capitale**.
-**Nota:** Per l'All-Share utilizziamo un ETF "All Cap" come proxy per garantire la qualità dei dati.
+**Sistema Ibrido:** Usa Yahoo Finance per le azioni e Stooq (Data Provider) per l'indice All-Share.
 """)
 
 # =========================
@@ -29,7 +29,17 @@ if 'multiselect_portfolio' not in st.session_state:
     st.session_state['multiselect_portfolio'] = []
 
 # =========================
-# 1. MOTORE DI RICERCA
+# HELPER: SESSIONI
+# =========================
+def get_session():
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    })
+    return session
+
+# =========================
+# 1. MOTORE DI RICERCA (Yahoo)
 # =========================
 def search_yahoo_finance(query):
     if not query or len(query) < 2: return []
@@ -60,9 +70,9 @@ def search_yahoo_finance(query):
 # DATABASE INDICI
 # =========================
 BENCHMARK_DICT = {
-    "FTSEMIB.MI": "🇮🇹 FTSE MIB (Indice Ufficiale)",
-    "ITAMIL.MI": "🇮🇹 FTSE Italia All-Share (Proxy ETF All Cap - Dati Sicuri)", 
-    "^STOXX50E": "🇪🇺 Euro Stoxx 50 (Europa - Blue Chips)",
+    "FTSEMIB.MI": "🇮🇹 FTSE MIB (Yahoo Finance)",
+    "STOOQ_ALLSHARE": "🇮🇹 FTSE Italia All-Share (Fonte: Stooq)", # <--- FONTE ALTERNATIVA CODICE
+    "^STOXX50E": "🇪🇺 Euro Stoxx 50 (Europa)",
     "^GDAXI": "🇩🇪 DAX 40 (Germania)",
     "^FCHI": "🇫🇷 CAC 40 (Francia)"
 }
@@ -90,7 +100,6 @@ if search_query:
             
             st.session_state['ticker_names_map'][ticker_to_add] = clean_name
             
-            # Forza selezione nel widget
             current = st.session_state.get('multiselect_portfolio', [])
             if ticker_to_add not in current:
                 st.session_state['multiselect_portfolio'] = current + [ticker_to_add]
@@ -101,7 +110,7 @@ if search_query:
 st.sidebar.markdown("---")
 st.sidebar.subheader("📋 Portafoglio Attivo")
 if not st.session_state['selected_tickers_list']:
-    st.sidebar.info("La lista è vuota.")
+    st.sidebar.info("Lista vuota.")
     
 final_selection = st.sidebar.multiselect(
     "Gestisci titoli:",
@@ -111,7 +120,6 @@ final_selection = st.sidebar.multiselect(
 
 if set(final_selection) != set(st.session_state['selected_tickers_list']):
     st.session_state['selected_tickers_list'] = final_selection
-    # No rerun here to avoid loop
 
 st.sidebar.markdown("---")
 
@@ -135,87 +143,160 @@ rf_input = st.sidebar.number_input("Risk Free (BTP 10Y)", value=3.8, step=0.1) /
 mrp_input = st.sidebar.number_input("Market Risk Premium", value=5.5, step=0.1) / 100
 
 # =========================
-# MOTORE DI CALCOLO (FIX DEFINITIVO)
+# MOTORE DI CALCOLO IBRIDO (YAHOO + STOOQ)
 # =========================
 
-def get_data_single_dates(ticker, start, end, interval):
-    """
-    Tenta di scaricare usando Ticker object che è più stabile di download()
-    """
+def clean_yahoo_dataframe(df):
+    """Pulisce i dati di Yahoo"""
+    if df is None or df.empty: return None
+    df.index = df.index.normalize()
+    if df.index.tz is not None: df.index = df.index.tz_localize(None)
+    
+    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+    
+    price_col = None
+    if "Close" in df.columns: price_col = df["Close"]
+    elif "Adj Close" in df.columns: price_col = df["Adj Close"]
+    if price_col is None: return None
+    if isinstance(price_col, pd.DataFrame): price_col = price_col.iloc[:, 0]
+    
+    def get_col(name):
+        if name in df.columns:
+            c = df[name]
+            if isinstance(c, pd.DataFrame): return c.iloc[:, 0]
+            return c
+        return price_col
+
+    return pd.DataFrame({
+        "Ultimo": price_col,
+        "Apertura": get_col("Open"),
+        "Massimo": get_col("High"),
+        "Minimo": get_col("Low"),
+        "Volume": get_col("Volume")
+    })
+
+def get_data_yahoo(ticker, start, end, interval):
+    """Scarica da Yahoo Finance"""
     try:
-        # Metodo 1: Ticker History (Più robusto sui singoli titoli)
-        dat = yf.Ticker(ticker)
+        session = get_session()
+        dat = yf.Ticker(ticker, session=session)
         df = dat.history(start=start, end=end, interval=interval, auto_adjust=False)
         
-        # Se vuoto, proviamo Metodo 2: Download classico con override
         if df.empty:
-            df = yf.download(ticker, start=start, end=end, interval=interval, auto_adjust=False, progress=False)
+            df = yf.download(ticker, start=start, end=end, interval=interval, auto_adjust=False, progress=False, session=session)
             
+        return clean_yahoo_dataframe(df)
+    except: return None
+
+def get_data_stooq(ticker_stooq, start, end, interval):
+    """
+    SCARICA DA STOOQ VIA CSV (Bypass Yahoo)
+    URL magico per scaricare dati storici senza limiti
+    """
+    try:
+        # Costruiamo URL per Stooq
+        # s = ticker, i = interval (d=daily, w=weekly, m=monthly)
+        # Stooq accetta 'd' per daily, poi noi ricampioniamo
+        url = f"https://stooq.com/q/d/l/?s={ticker_stooq}&i=d"
+        
+        df = pd.read_csv(url)
+        
+        # Pulizia Stooq
+        if df.empty or 'Date' not in df.columns: return None
+        
+        df['Date'] = pd.to_datetime(df['Date'])
+        df = df.set_index('Date').sort_index()
+        
+        # Filtro date
+        mask = (df.index >= pd.to_datetime(start)) & (df.index <= pd.to_datetime(end))
+        df = df.loc[mask]
+        
         if df.empty: return None
         
-        # Pulizia
-        df.index = df.index.normalize()
-        
-        # Gestione colonne MultiIndex
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-            
-        # Trova Close
-        if "Close" in df.columns: price_col = df["Close"]
-        elif "Adj Close" in df.columns: price_col = df["Adj Close"]
-        else: return None 
-            
-        if isinstance(price_col, pd.DataFrame): price_col = price_col.iloc[:, 0]
-            
-        def get_col(name):
-            if name in df.columns:
-                c = df[name]
-                if isinstance(c, pd.DataFrame): return c.iloc[:, 0]
-                return c
-            return price_col 
-
-        return pd.DataFrame({
-            "Ultimo": price_col,
-            "Apertura": get_col("Open"),
-            "Massimo": get_col("High"),
-            "Minimo": get_col("Low"),
-            "Volume": get_col("Volume")
+        # Mapping colonne (Stooq usa nomi inglesi standard)
+        df = df.rename(columns={
+            "Close": "Ultimo", "Open": "Apertura", 
+            "High": "Massimo", "Low": "Minimo", "Volume": "Volume"
         })
+        
+        # Resampling se necessario (Stooq da daily, noi vogliamo weekly/monthly)
+        resample_rule = "W-FRI" if interval == "1wk" else "M"
+        df_resampled = df.resample(resample_rule).agg({
+            "Ultimo": "last",
+            "Apertura": "first",
+            "Massimo": "max",
+            "Minimo": "min",
+            "Volume": "sum"
+        }).dropna()
+        
+        return df_resampled
     except Exception as e:
         return None
 
-def get_data_pair_robust(ticker, benchmark, start, end, interval):
-    df_asset = get_data_single_dates(ticker, start, end, interval)
-    df_bench = get_data_single_dates(benchmark, start, end, interval)
+def get_data_pair_manager(ticker, benchmark_ticker, start, end, interval):
+    # 1. Scarica ASSET (Sempre da Yahoo, le azioni vanno bene)
+    df_asset = get_data_yahoo(ticker, start, end, interval)
+    if df_asset is None: 
+        return None, None, f"Errore Ticker: {ticker} non risponde su Yahoo."
     
-    if df_asset is None and df_bench is None: return None, None, "Errore Totale: Nessun dato disponibile (Controlla connessione)."
-    if df_asset is None: return None, None, f"Errore Ticker: {ticker} non risponde."
-    if df_bench is None: return None, None, f"Errore Benchmark: {benchmark} non scaricabile."
-
-    common_idx = df_asset.index.intersection(df_bench.index)
+    # 2. Scarica BENCHMARK (Logica Ibrida)
+    df_bench = None
+    bench_real_name = benchmark_ticker
     
-    min_obs = 6 if interval == "1mo" else 10
-    if len(common_idx) < min_obs: 
-        return None, None, f"Errore Sincronizzazione: Solo {len(common_idx)} date in comune."
+    if benchmark_ticker == "STOOQ_ALLSHARE":
+        # Usiamo il ticker Stooq per il FTSE Italia All Share
+        # Codice Stooq: ITLMS.M (M sta per Milano)
+        df_bench = get_data_stooq("ITLMS.M", start, end, interval)
+        bench_real_name = "FTSE Italia All-Share (Stooq)"
         
-    df_asset = df_asset.loc[common_idx].sort_index(ascending=False)
-    df_bench = df_bench.loc[common_idx].sort_index(ascending=False)
+        # Se Stooq fallisce, piano C: ETF
+        if df_bench is None:
+             df_bench = get_data_yahoo("ITAMIL.MI", start, end, interval)
+             bench_real_name = "FTSE Italia All-Share (ETF Backup)"
+    else:
+        # Normale Yahoo per MIB, DAX, ecc.
+        df_bench = get_data_yahoo(benchmark_ticker, start, end, interval)
+
+    if df_bench is None:
+        return None, None, f"Errore Benchmark: Impossibile scaricare indice."
+
+    # 3. Intersezione
+    # Normalizziamo fusi orari per sicurezza
+    if df_asset.index.tz is not None: df_asset.index = df_asset.index.tz_localize(None)
+    if df_bench.index.tz is not None: df_bench.index = df_bench.index.tz_localize(None)
+
+    # Merge tollerante (perché Stooq e Yahoo possono avere date leggermente diverse fine settimana)
+    df_asset = df_asset.sort_index()
+    df_bench = df_bench.sort_index()
     
-    return df_asset, df_bench, None
+    merged = pd.merge_asof(
+        df_asset, df_bench, 
+        left_index=True, right_index=True, 
+        suffixes=('_ass', '_ben'), 
+        direction='nearest', 
+        tolerance=pd.Timedelta(days=6)
+    ).dropna()
+    
+    if len(merged) < 6: 
+        return None, None, f"Errore Sincronizzazione: {ticker} e {bench_real_name} non si allineano."
+        
+    df_asset_aligned = pd.DataFrame({"Ultimo": merged["Ultimo_ass"]})
+    df_bench_aligned = pd.DataFrame({"Ultimo": merged["Ultimo_ben"]})
+    
+    return df_asset_aligned, df_bench_aligned, bench_real_name
 
 def calculate_metrics(df_asset, df_bench, rf, mrp, interval):
     df_asset["Var %"] = df_asset["Ultimo"].pct_change()
     df_bench["Var %"] = df_bench["Ultimo"].pct_change()
-    
     df_asset["Rendimento %"] = df_asset["Var %"]
     df_bench["Rendimento %"] = df_bench["Var %"]
 
     df_asset = df_asset.dropna()
     df_bench = df_bench.dropna()
     
-    common_idx = df_asset.index.intersection(df_bench.index)
-    df_asset = df_asset.loc[common_idx]
-    df_bench = df_bench.loc[common_idx]
+    common = df_asset.index.intersection(df_bench.index)
+    df_asset = df_asset.loc[common]
+    df_bench = df_bench.loc[common]
 
     min_obs = 5 if interval == "1mo" else 10
     if len(df_asset) < min_obs: return None, None, None 
@@ -239,12 +320,9 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
         for ticker, data in analysis_results.items():
             full_name = st.session_state['ticker_names_map'].get(ticker, ticker)
             summary_data.append({
-                "Ragione Sociale": full_name,
-                "Ticker": ticker,
-                "Beta": f"{data['stats']['Beta']:.3f}",
-                "Covarianza": f"{data['stats']['Covarianza']:.6f}",
-                "Varianza Mkt": f"{data['stats']['Varianza']:.6f}",
-                "Rendimento Atteso (CAPM)": fmt_pct(data['stats']['Exp Return'])
+                "Ragione Sociale": full_name, "Ticker": ticker, "Benchmark": data['bench_used_name'],
+                "Beta": f"{data['stats']['Beta']:.3f}", "Covarianza": f"{data['stats']['Covarianza']:.6f}",
+                "Varianza Mkt": f"{data['stats']['Varianza']:.6f}", "Rendimento Atteso (CAPM)": fmt_pct(data['stats']['Exp Return'])
             })
         pd.DataFrame(summary_data).to_excel(writer, sheet_name="Sintesi", index=False)
         
@@ -262,29 +340,27 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
             df_asset_view = data['df_asset'].copy()
             df_bench_view = data['df_bench'].copy()
             
+            # Assicurazione Timezone
+            if df_asset_view.index.tz is not None: df_asset_view.index = df_asset_view.index.tz_localize(None)
+            if df_bench_view.index.tz is not None: df_bench_view.index = df_bench_view.index.tz_localize(None)
+
             for col in ["Var %", "Rendimento %"]:
                 if col in df_asset_view.columns: df_asset_view[col] = df_asset_view[col].apply(fmt_pct)
                 if col in df_bench_view.columns: df_bench_view[col] = df_bench_view[col].apply(fmt_pct)
 
             ws = writer.sheets[sheet_name]
-            
             ws.cell(row=9, column=1, value=f"{full_name} ({ticker})") 
             df_asset_view.to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=0)
-            offset = len(df_asset_view.columns) + 1 + 2 
-            ws.cell(row=9, column=offset + 1, value=f"{bench_name} (Benchmark)")
-            df_bench_view.to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=offset)
+            ws.cell(row=9, column=4, value=f"{data['bench_used_name']}")
+            df_bench_view.to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=3)
             
             for col in ws.columns:
                 max_len = 0
                 for cell in col:
-                    try: 
-                        val_str = str(cell.value)
-                        if len(val_str) > max_len: max_len = len(val_str)
-                    except: pass
-                
-                adjusted_width = (max_len * 1.7) + 6
-                if adjusted_width < 25: adjusted_width = 25
-                ws.column_dimensions[col[0].column_letter].width = adjusted_width
+                    try: val_str = str(cell.value)
+                    except: val_str = ""
+                    if len(val_str) > max_len: max_len = len(val_str)
+                ws.column_dimensions[col[0].column_letter].width = (max_len * 1.5) + 6
             
     return output.getvalue()
 
@@ -304,41 +380,38 @@ if st.button("🚀 Avvia Analisi (Aggiorna)", type="primary"):
             error_log = []
             
             for t in final_selection:
-                df_asset, df_bench, err_msg = get_data_pair_robust(t, benchmark_ticker, start_date, end_date, interval_code)
+                df_asset, df_bench, bench_name = get_data_pair_manager(t, benchmark_ticker, start_date, end_date, interval_code)
                 
                 if df_asset is not None:
                     res = calculate_metrics(df_asset, df_bench, rf_input, mrp_input, interval_code)
                     if res[0] is not None:
-                        results[t] = {"df_asset": res[0], "df_bench": res[1], "stats": res[2]}
+                        results[t] = {
+                            "df_asset": res[0], "df_bench": res[1], "stats": res[2], "bench_used_name": bench_name
+                        }
                 else:
-                    error_log.append(f"❌ {t}: {err_msg}")
+                    error_log.append(f"❌ {t}: {bench_name}")
             
             if results:
                 st.session_state['analysis_results'] = results
                 st.session_state['bench_used'] = selected_bench_display 
                 st.session_state['done'] = True
-                st.toast(f'✅ Analisi aggiornata!', icon="🚀")
-                if error_log:
-                    with st.expander("⚠️ Problemi rilevati"):
-                        for e in error_log: st.write(e)
-            else:
-                st.error("Nessun dato valido.")
-                if error_log:
-                    for e in error_log: st.write(e)
+                st.toast(f'✅ Fatto!', icon="🚀")
+            
+            if error_log:
+                for e in error_log: st.error(e)
 
 # =========================
 # OUTPUT
 # =========================
 if st.session_state.get('done'):
     results = st.session_state['analysis_results']
-    bench_name = st.session_state.get('bench_used', selected_bench_display)
     
     summary_list = []
     for t, data in results.items():
         full_name = st.session_state['ticker_names_map'].get(t, t)
         summary_list.append({
-            "Società": full_name, "Ticker": t, "Beta": data['stats']['Beta'],
-            "CAPM Return": f"{data['stats']['Exp Return']*100:.2f}%"
+            "Società": full_name, "Ticker": t, "Benchmark": data['bench_used_name'],
+            "Beta": data['stats']['Beta'], "CAPM Return": f"{data['stats']['Exp Return']*100:.2f}%"
         })
     
     st.subheader("📋 Sintesi Risultati")
@@ -348,13 +421,13 @@ if st.session_state.get('done'):
     with col1:
         st.subheader("Confronto Rischio")
         beta_df = pd.DataFrame(summary_list)
-        fig = px.bar(beta_df, x="Società", y="Beta", text_auto=".2f", title=f"Beta vs {bench_name} (1.0)")
+        fig = px.bar(beta_df, x="Società", y="Beta", text_auto=".2f", title=f"Beta")
         fig.add_hline(y=1, line_dash="dash", annotation_text="Mercato")
         st.plotly_chart(fig, use_container_width=True)
     with col2:
         st.info(f"Dati: **{freq_option}**\n\nDal: **{start_date}**\n\nAl: **{end_date}**")
 
-    excel_file = generate_excel_report(results, rf_input, mrp_input, bench_name)
+    excel_file = generate_excel_report(results, rf_input, mrp_input, selected_bench_display)
     st.download_button("📥 Scarica Report Excel", data=excel_file, file_name="Analisi_Finanziaria.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
 
 # =========================
