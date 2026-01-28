@@ -13,12 +13,24 @@ st.set_page_config(page_title="Analisi Finanziaria Beta & CAPM", layout="wide")
 st.title("📊 Analisi Finanziaria: Beta, CAPM e Dati Storici")
 st.markdown("""
 Strumento professionale per il calcolo del **Costo del Capitale** e del **Rischio Sistematico (Beta)**.
-Confronto diretto (Side-by-Side) tra i titoli del **Paniere FTSE MIB** e il Benchmark di mercato.
+Confronto diretto (Side-by-Side) tra i titoli selezionati e l'indice di riferimento (Benchmark).
 """)
 
 # =========================
-# LISTA TITOLI (FTSE MIB)
+# DATABASE INDICI E TITOLI
 # =========================
+
+# Mappa dei principali indici mondiali (Nome Visualizzato -> Ticker Yahoo)
+BENCHMARK_OPTIONS = {
+    "FTSE MIB (Italia 40 - Principale)": "FTSEMIB.MI",
+    "FTSE Italia All-Share (Tutto il listino)": "^FTITLMS",
+    "DAX (Germania 40)": "^GDAXI",
+    "CAC 40 (Francia)": "^FCHI",
+    "S&P 500 (USA)": "^GSPC",
+    "Euro Stoxx 50 (Europa)": "^STOXX50E"
+}
+
+# Lista titoli FTSE MIB precaricati
 FTSE_MIB_TICKERS = [
     "A2A.MI", "AMP.MI", "AZM.MI", "BGN.MI", "BMED.MI", "BAMI.MI", "BPE.MI", 
     "CPR.MI", "DIA.MI", "ENEL.MI", "ENI.MI", "ERG.MI", "RACE.MI", "FBK.MI", 
@@ -33,24 +45,36 @@ FTSE_MIB_TICKERS = [
 # =========================
 st.sidebar.header("⚙️ Configurazione Analisi")
 
-# Input dinamico: Multiselect con ricerca
-st.sidebar.subheader("Selezione Titoli")
+# 1. Selezione Titoli (Asset)
+st.sidebar.subheader("1. Selezione Asset")
 selected_tickers = st.sidebar.multiselect(
-    "Scegli i titoli dal paniere FTSE MIB:",
+    "Scegli i titoli:",
     options=FTSE_MIB_TICKERS,
-    default=["ENEL.MI", "ISP.MI", "ENI.MI"], # Default attivi all'avvio
-    help="Puoi digitare per cercare (es. 'Ferrari') o selezionare dalla lista."
+    default=["ENEL.MI", "ISP.MI", "ENI.MI"], 
+    help="Digita per cercare o seleziona dalla lista."
 )
 
-benchmark_ticker = "FTSEMIB.MI"
+st.sidebar.markdown("---")
+
+# 2. Selezione Benchmark (Indice)
+st.sidebar.subheader("2. Selezione Benchmark")
+selected_bench_name = st.sidebar.selectbox(
+    "Confronta con Indice:",
+    options=list(BENCHMARK_OPTIONS.keys()),
+    index=0 # Default: FTSE MIB
+)
+# Recuperiamo il ticker vero (es. FTSEMIB.MI) dal nome scelto
+benchmark_ticker = BENCHMARK_OPTIONS[selected_bench_name]
 
 st.sidebar.markdown("---")
-st.sidebar.header("Parametri CAPM")
+
+# 3. Parametri CAPM
+st.sidebar.subheader("3. Parametri Macro")
 rf_input = st.sidebar.number_input("Risk Free Rate (BTP 10Y)", value=3.8, step=0.1) / 100
-mrp_input = st.sidebar.number_input("Market Risk Premium (Fernandez)", value=5.5, step=0.1) / 100
+mrp_input = st.sidebar.number_input("Market Risk Premium", value=5.5, step=0.1) / 100
 years_input = st.sidebar.slider("Orizzonte Temporale (Anni)", 1, 5, 2) 
 
-st.sidebar.info("Modifica la selezione e premi **Avvia Analisi**.")
+st.sidebar.info("Modifica i parametri e premi **Avvia Analisi**.")
 
 # =========================
 # MOTORE DI CALCOLO
@@ -60,10 +84,8 @@ st.sidebar.info("Modifica la selezione e premi **Avvia Analisi**.")
 def get_data_pair(ticker, benchmark, years):
     """Scarica i dati per una coppia Ticker-Benchmark e li allinea"""
     try:
-        # Scarichiamo entrambi i ticker
         data = yf.download([ticker, benchmark], period=f"{years}y", interval="1wk", auto_adjust=False, progress=False)
         
-        # Estraiamo i dati grezzi
         try:
             closes = data["Close"][[ticker, benchmark]].dropna()
             opens = data["Open"][[ticker, benchmark]].dropna()
@@ -73,10 +95,8 @@ def get_data_pair(ticker, benchmark, years):
         except KeyError:
             return None, None
 
-        # Allineamento date (Intersezione)
         common_index = closes.index
         
-        # Creiamo DataFrame Asset
         df_asset = pd.DataFrame({
             "Data": common_index,
             "Ultimo": closes[ticker],
@@ -86,7 +106,6 @@ def get_data_pair(ticker, benchmark, years):
             "Volume": vols[ticker]
         }).set_index("Data")
 
-        # Creiamo DataFrame Benchmark
         df_bench = pd.DataFrame({
             "Data": common_index,
             "Ultimo": closes[benchmark],
@@ -104,23 +123,21 @@ def get_data_pair(ticker, benchmark, years):
 def calculate_metrics_and_structure(df_asset, df_bench, rf, mrp, years):
     """Calcola Beta, Var% e prepara i dati separati"""
     
-    # 1. Calcolo Variazione % (Rendimento Semplice)
+    # Calcolo Rendimenti
     df_asset["Var %"] = df_asset["Ultimo"].pct_change()
     df_asset["Rendimento %"] = df_asset["Var %"]
     
     df_bench["Var %"] = df_bench["Ultimo"].pct_change()
     df_bench["Rendimento %"] = df_bench["Var %"]
 
-    # Rimuoviamo la prima riga che è NaN
     df_asset = df_asset.dropna()
     df_bench = df_bench.dropna()
     
-    # Ri-allineamento
     common_idx = df_asset.index.intersection(df_bench.index)
-    df_asset = df_asset.loc[common_idx].sort_index(ascending=False) # Dal più recente
+    df_asset = df_asset.loc[common_idx].sort_index(ascending=False)
     df_bench = df_bench.loc[common_idx].sort_index(ascending=False)
 
-    # 2. Calcolo Beta (Covarianza / Varianza)
+    # Beta
     y = df_asset["Var %"]
     x = df_bench["Var %"]
     
@@ -128,7 +145,6 @@ def calculate_metrics_and_structure(df_asset, df_bench, rf, mrp, years):
     variance = np.var(x, ddof=1) 
     beta = covariance / variance
     
-    # 3. Parametri CAPM
     expected_return = rf + beta * mrp
     
     stats = {
@@ -140,17 +156,16 @@ def calculate_metrics_and_structure(df_asset, df_bench, rf, mrp, years):
     
     return df_asset, df_bench, stats
 
-def generate_excel_report(analysis_results, rf, mrp):
-    """Genera Excel con formattazione % e SPAZIATURA"""
+def generate_excel_report(analysis_results, rf, mrp, bench_name):
+    """Genera Excel con NOME INDICE DINAMICO"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         
-        # --- Helper per formattare in % ---
         def fmt_pct(val):
             if pd.isna(val) or isinstance(val, str): return val
             return f"{val * 100:.3f}%"
         
-        # Foglio Riepilogo
+        # Foglio Sintesi
         summary_data = []
         for ticker, data in analysis_results.items():
             summary_data.append({
@@ -162,11 +177,11 @@ def generate_excel_report(analysis_results, rf, mrp):
             })
         pd.DataFrame(summary_data).to_excel(writer, sheet_name="Sintesi", index=False)
         
-        # Un Foglio per ogni Ticker
+        # Fogli Dettaglio
         for ticker, data in analysis_results.items():
             sheet_name = ticker.replace(".MI", "")[:30] 
             
-            # --- 1. Preparazione Metriche in Alto ---
+            # Intestazione Metriche
             risk_free_fmt = fmt_pct(rf)
             mrp_fmt = fmt_pct(mrp)
             capm_fmt = fmt_pct(data['stats']['Exp Return'])
@@ -184,12 +199,11 @@ def generate_excel_report(analysis_results, rf, mrp):
             })
             metrics_df.to_excel(writer, sheet_name=sheet_name, startrow=0, startcol=0, index=False)
             
-            # --- 2. Preparazione Dati Storici ---
+            # Dati Storici
             df_asset_view = data['df_asset'].copy()
             df_bench_view = data['df_bench'].copy()
             
-            cols_to_format = ["Var %", "Rendimento %"]
-            for col in cols_to_format:
+            for col in ["Var %", "Rendimento %"]:
                 if col in df_asset_view.columns:
                     df_asset_view[col] = df_asset_view[col].apply(fmt_pct)
                 if col in df_bench_view.columns:
@@ -198,17 +212,16 @@ def generate_excel_report(analysis_results, rf, mrp):
             workbook = writer.book
             worksheet = writer.sheets[sheet_name]
             
-            # SCRITTURA BLOCCHI
+            # Scrittura Side-by-Side
             worksheet.cell(row=9, column=1, value=ticker) 
             df_asset_view.to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=0)
             
             offset = len(df_asset_view.columns) + 1 + 2 
-            worksheet.cell(row=9, column=offset + 1, value="FTSE MIB (Benchmark)")
+            # Qui usiamo il nome dinamico del benchmark scelto dall'utente
+            worksheet.cell(row=9, column=offset + 1, value=f"{bench_name} (Benchmark)")
             df_bench_view.to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=offset)
             
-        # ==========================================
-        # AUTO-ADJUST COLUMNS
-        # ==========================================
+        # Auto-width
         for sheet_name in writer.sheets:
             worksheet = writer.sheets[sheet_name]
             for column in worksheet.columns:
@@ -216,10 +229,8 @@ def generate_excel_report(analysis_results, rf, mrp):
                 column_letter = column[0].column_letter
                 for cell in column:
                     try:
-                        if len(str(cell.value)) > max_length:
-                            max_length = len(str(cell.value))
-                    except:
-                        pass
+                        if len(str(cell.value)) > max_length: max_length = len(str(cell.value))
+                    except: pass
                 adjusted_width = (max_length + 2)
                 if adjusted_width < 12: adjusted_width = 12
                 worksheet.column_dimensions[column_letter].width = adjusted_width
@@ -227,17 +238,16 @@ def generate_excel_report(analysis_results, rf, mrp):
     return output.getvalue()
 
 # =========================
-# LOGICA APP (AGGIORNAMENTO DINAMICO)
+# LOGICA APP
 # =========================
 if st.button("🚀 Avvia Analisi", type="primary"):
     
-    # 1. Recuperiamo i ticker dalla MULTISELECT (è già una lista!)
     tickers_list = selected_tickers
     
     if not tickers_list:
-        st.error("⚠️ Seleziona almeno un titolo dalla lista a sinistra.")
+        st.error("⚠️ Seleziona almeno un titolo dalla lista.")
     else:
-        with st.spinner(f'Analisi in corso per: {", ".join(tickers_list)}...'):
+        with st.spinner(f'Confronto titoli vs {selected_bench_name}...'):
             results = {}
             
             for t in tickers_list:
@@ -253,18 +263,19 @@ if st.button("🚀 Avvia Analisi", type="primary"):
             
             if results:
                 st.session_state['analysis_results'] = results
+                st.session_state['bench_used'] = selected_bench_name # Salviamo il nome del benchmark usato
                 st.session_state['done'] = True
-                st.toast(f'✅ Analisi completata per {len(results)} ticker!', icon="🚀")
+                st.toast(f'✅ Analisi completata con {selected_bench_name}!', icon="🚀")
             else:
-                st.error("Impossibile scaricare i dati. Riprova più tardi.")
+                st.error("Impossibile scaricare i dati. Controlla la connessione.")
 
 # =========================
-# VISUALIZZAZIONE RISULTATI
+# VISUALIZZAZIONE
 # =========================
 if st.session_state.get('done'):
     results = st.session_state['analysis_results']
+    bench_name = st.session_state.get('bench_used', selected_bench_name)
     
-    # Tabella Riepilogo
     summary_list = []
     for t, data in results.items():
         summary_list.append({
@@ -276,22 +287,21 @@ if st.session_state.get('done'):
     st.subheader("📋 Sintesi Risultati")
     st.dataframe(pd.DataFrame(summary_list), use_container_width=True)
     
-    # Grafico
     col1, col2 = st.columns([2, 1])
     with col1:
         st.subheader("Confronto Rischio (Beta)")
         beta_df = pd.DataFrame(summary_list)
-        fig = px.bar(beta_df, x="Ticker", y="Beta", text_auto=".2f", title="Beta vs Mercato (1.0)")
+        fig = px.bar(beta_df, x="Ticker", y="Beta", text_auto=".2f", title=f"Beta vs {bench_name} (1.0)")
         fig.add_hline(y=1, line_dash="dash", annotation_text="Mercato")
         st.plotly_chart(fig, use_container_width=True)
     
     with col2:
-        st.info("Risultati calcolati sui titoli selezionati dal menu.")
+        st.info(f"Analisi basata sul confronto con **{bench_name}**.")
 
-    # Download Excel
-    excel_file = generate_excel_report(results, rf_input, mrp_input)
+    # Download Excel con parametro nome benchmark
+    excel_file = generate_excel_report(results, rf_input, mrp_input, bench_name)
     st.download_button(
-        label="📥 Scarica Report Excel (Formattato)",
+        label="📥 Scarica Report Excel",
         data=excel_file,
         file_name="Analisi_Finanziaria_Completa.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -304,24 +314,21 @@ if st.session_state.get('done'):
 st.markdown("---")
 with st.expander("📚 Metodologia e Fonte Dati"):
     st.markdown(r"""
-    ### 1. Selezione Dati e Struttura
-    L'applicazione permette una selezione guidata tra i principali titoli del paniere **FTSE MIB**.
-    L'analisi processa serie storiche **settimanali** per garantire robustezza statistica.
+    ### 1. Selezione Benchmark
+    L'utente può selezionare l'indice di riferimento (Benchmark) per il calcolo del Beta.
     
+    * **FTSE MIB:** Indice delle 40 società italiane a maggiore capitalizzazione ("Blue Chips"). Rappresenta circa l'80% della capitalizzazione totale. Ideale per analizzare titoli grandi (es. Enel, Eni).
+    * **FTSE Italia All-Share:** Indice comprensivo che include FTSE MIB, Mid Cap e Small Cap. Ideale se si analizzano titoli a bassa capitalizzazione per avere un confronto più ampio.
+    
+    ### 2. Struttura dei Dati
     Il report Excel generato offre una visualizzazione **Side-by-Side**:
     * **Lato Sinistro:** Dati OHLCV e Rendimenti del Titolo selezionato.
-    * **Lato Destro:** Dati allineati del Benchmark (**FTSE MIB**).
+    * **Lato Destro:** Dati allineati del Benchmark scelto (es. FTSE MIB o All-Share).
     
-    ### 2. Calcolo dei Parametri di Rischio
-    Il coefficiente **Beta ($\beta$)** è calcolato replicando la metodologia accademica classica (Covarianza/Varianza):
+    ### 3. Calcolo dei Parametri
+    * **Beta ($\beta$):** $\frac{Cov(R_{asset}, R_{benchmark})}{Var(R_{benchmark})}$
+    * **CAPM Return:** $R_f + \beta \times MRP$
     
-    $$ \beta = \frac{Cov(R_{asset}, R_{market})}{Var(R_{market})} $$
-    
-    ### 3. Costo del Capitale (CAPM)
-    Il rendimento atteso ("CAPM Return") è calcolato come:
-    
-    $$ E(R) = R_f + \beta \times (R_m - R_f) $$
-    
-    * **Risk-Free Rate ($R_f$):** BTP Italia 10 Anni (Default: ~3.8%). 
-    * **Market Risk Premium ($MRP$):** 5.5% (Survey IESE Pablo Fernandez, 2025).
+    * **Risk-Free ($R_f$):** BTP Italia 10Y (Default ~3.8%).
+    * **MRP:** 5.5% (Survey Fernandez 2025).
     """)
