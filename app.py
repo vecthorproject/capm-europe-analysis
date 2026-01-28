@@ -84,7 +84,7 @@ def add_ticker_to_portfolio():
         if ticker_to_add not in current_selection:
             st.session_state['multiselect_portfolio'] = current_selection + [ticker_to_add]
             
-        st.toast(f"✅ Aggiunto: {clean_name}", icon="in")
+        st.toast(f"✅ Aggiunto: {clean_name}", icon="✅")
 
 # =========================
 # DATABASE INDICI
@@ -340,8 +340,6 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
             ws = writer.sheets[sheet_name]
             
             # INTESTAZIONI DINAMICHE
-            # Invece di "DATI SOCIETA", usiamo il Nome (es. ENEL)
-            # Invece di "DATI BENCHMARK", usiamo il Nome Indice (es. FTSE MIB)
             ws.merge_cells(start_row=start_row_data-1, start_column=1, end_row=start_row_data-1, end_column=3)
             ws.cell(row=start_row_data-1, column=1, value=full_name.upper()) # Dynamic Header
             
@@ -360,12 +358,12 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
                         cell.font = header_font
 
             # Larghezza Colonne
-            ws.column_dimensions['A'].width = 20 # Data
-            ws.column_dimensions['B'].width = 15 # Prezzo Asset
-            ws.column_dimensions['C'].width = 15 # Var Asset
-            ws.column_dimensions['D'].width = 5  # Separatore (Stretto)
-            ws.column_dimensions['E'].width = 15 # Prezzo Bench
-            ws.column_dimensions['F'].width = 15 # Var Bench
+            ws.column_dimensions['A'].width = 20 
+            ws.column_dimensions['B'].width = 15 
+            ws.column_dimensions['C'].width = 15 
+            ws.column_dimensions['D'].width = 5  
+            ws.column_dimensions['E'].width = 15 
+            ws.column_dimensions['F'].width = 15 
             
     return output.getvalue()
 
@@ -438,6 +436,7 @@ if st.session_state.get('done'):
 st.markdown("---")
 with st.expander("ℹ️ Info Metodologiche"):
     st.markdown("I dati sono rettificati per dividendi e split. Il Beta è calcolato sulla covarianza dei rendimenti.")
+    
 # RELAZIONE METODOLOGICA (Espansa e Aggiornata)
 # =========================
 st.markdown("---")
