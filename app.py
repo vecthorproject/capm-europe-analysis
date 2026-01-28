@@ -16,7 +16,7 @@ st.set_page_config(page_title="Analisi Beta Pro", layout="wide")
 st.title("🇪🇺 Analisi Finanziaria: Focus Europa & Italia")
 st.markdown("""
 Strumento professionale per il calcolo del **Beta**.
-**Nota Tecnica:** Report Excel esteso con layout OHLCV completo e doppia spaziatura.
+**Nota Tecnica:** Report Excel Full OHLCV con layout spaziato e colonne date ottimizzate.
 """)
 
 # =========================
@@ -392,9 +392,10 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
                     if cell.row == 1 or cell.row == start_row_data or cell.row == start_row_data+1:
                         cell.font = header_font
 
-            # LARGHEZZA COLONNE AUTOMATICA (Customizzata)
+            # LARGHEZZA COLONNE (FIX: 18 per la Data)
             # Layout: 8 cols (Asset) + 2 cols (Sep) + 8 cols (Bench)
-            col_widths = [12, 10, 10, 10, 10, 12, 10, 12] # Data, Ult, Ap, Max, Min, Vol, Var, Rend
+            # Indice 0 = Data -> 18
+            col_widths = [18, 10, 10, 10, 10, 12, 10, 12] 
             
             # Applica larghezze Asset
             for i, w in enumerate(col_widths):
