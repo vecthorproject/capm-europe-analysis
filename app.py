@@ -395,7 +395,7 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
             # LARGHEZZA COLONNE (FIX: 18 per la Data)
             # Layout: 8 cols (Asset) + 2 cols (Sep) + 8 cols (Bench)
             # Indice 0 = Data -> 18
-            col_widths = [18, 10, 10, 10, 10, 12, 10, 12] 
+            col_widths = [18, 10, 10, 10, 10, 12, 10, 16] 
             
             # Applica larghezze Asset
             for i, w in enumerate(col_widths):
