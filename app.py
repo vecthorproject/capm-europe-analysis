@@ -71,7 +71,7 @@ def search_yahoo_finance(query):
 # =========================
 BENCHMARK_DICT = {
     "FTSEMIB.MI": "🇮🇹 FTSE MIB (Large Cap - Yahoo)",
-    "STOOQ_ITLMS": "🇮🇹 FTSE Italia All-Share (Totale - Fonte Stooq)", # <--- QUI LA MAGIA
+    "STOOQ_ITLMS": "🇮🇹 FTSE Italia All-Share (Totale - Fonte Stooq)", 
     "^STOXX50E": "🇪🇺 Euro Stoxx 50 (Europa)",
     "^GDAXI": "🇩🇪 DAX 40 (Germania)",
     "^FCHI": "🇫🇷 CAC 40 (Francia)"
@@ -204,14 +204,27 @@ def resample_daily_data(df, target_interval):
 def get_data_stooq_allshare(start, end, target_interval):
     """
     SCARICA L'INDICE ALL-SHARE DA STOOQ (Fonte Esterna)
+    FIX: Aggiunto User-Agent per evitare blocco 403
     """
     try:
         # ITLMS.M è il codice Stooq per FTSE Italia All Share
-        # Scarichiamo sempre Daily ('d') e poi convertiamo noi
         url = f"https://stooq.com/q/d/l/?s=itlms.m&i=d"
         
-        # Pandas legge direttamente il CSV dall'URL
-        df = pd.read_csv(url)
+        # --- FIX INIZIO ---
+        # Simuliamo un browser reale
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        
+        # Scarichiamo i byte raw
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code != 200:
+            return None
+            
+        # Pandas legge il buffer di byte
+        df = pd.read_csv(io.BytesIO(response.content))
+        # --- FIX FINE ---
         
         if df.empty or 'Date' not in df.columns: return None
         
@@ -238,6 +251,7 @@ def get_data_stooq_allshare(start, end, target_interval):
         return resample_daily_data(df_clean, target_interval)
         
     except Exception as e:
+        # print(f"Debug Stooq Error: {e}") # Scommentare per debug
         return None
 
 def get_data_yahoo_resampled(ticker, start, end, target_interval):
@@ -512,3 +526,4 @@ with st.expander("📖 Leggi la Relazione Completa (Metodologia, Indici e Formul
     * **Market Risk Premium ($MRP$):** Fissato al **5.5%**.
         * *Fonte:* **Survey IESE Business School (Pablo Fernandez, 2025)**. Rappresenta il premio per il rischio azionario medio richiesto dagli investitori istituzionali per il mercato italiano.
     """)
+    
