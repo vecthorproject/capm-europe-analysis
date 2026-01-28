@@ -5,3 +5,4 @@ yfinance
 statsmodels
 plotly
 openpyxl
+lxml
