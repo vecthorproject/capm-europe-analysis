@@ -25,19 +25,8 @@ if 'selected_tickers_list' not in st.session_state:
     st.session_state['selected_tickers_list'] = [] 
 if 'ticker_names_map' not in st.session_state:
     st.session_state['ticker_names_map'] = {}
-# Inizializziamo la chiave del widget se non esiste
 if 'multiselect_portfolio' not in st.session_state:
     st.session_state['multiselect_portfolio'] = []
-
-# =========================
-# FIX SESSIONE YAHOO
-# =========================
-def get_yahoo_session():
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    })
-    return session
 
 # =========================
 # 1. MOTORE DI RICERCA
@@ -83,7 +72,7 @@ BENCHMARK_DICT = {
 # =========================
 st.sidebar.header("⚙️ Configurazione")
 
-# 1. RICERCA
+# RICERCA
 st.sidebar.subheader("1. Cerca Titolo")
 search_query = st.sidebar.text_input("Nome azienda (es. Enel, Ferrari):", "")
 
@@ -92,99 +81,86 @@ if search_query:
     if search_results:
         selected_tuple = st.sidebar.selectbox("Risultati trovati:", options=search_results, format_func=lambda x: x[0])
         
-        # --- LOGICA CORRETTA DI AGGIUNTA E SELEZIONE ---
         if st.sidebar.button("➕ Aggiungi al Portafoglio"):
             ticker_to_add = selected_tuple[1]
             clean_name = selected_tuple[2]
             
-            # 1. Aggiorna la lista delle opzioni disponibili
             if ticker_to_add not in st.session_state['selected_tickers_list']:
                 st.session_state['selected_tickers_list'].append(ticker_to_add)
             
-            # 2. Aggiorna la mappa dei nomi
             st.session_state['ticker_names_map'][ticker_to_add] = clean_name
             
-            # 3. CRUCIALE: Forza la selezione nel widget multiselect
-            # Recuperiamo cosa è selezionato ora e aggiungiamo il nuovo
-            current_selection = st.session_state.get('multiselect_portfolio', [])
-            if ticker_to_add not in current_selection:
-                st.session_state['multiselect_portfolio'] = current_selection + [ticker_to_add]
+            # Forza selezione nel widget
+            current = st.session_state.get('multiselect_portfolio', [])
+            if ticker_to_add not in current:
+                st.session_state['multiselect_portfolio'] = current + [ticker_to_add]
             
             st.rerun()
 
-# 2. PORTAFOGLIO
+# PORTAFOGLIO
 st.sidebar.markdown("---")
 st.sidebar.subheader("📋 Portafoglio Attivo")
-
-# Se la lista opzioni è vuota
 if not st.session_state['selected_tickers_list']:
     st.sidebar.info("La lista è vuota.")
-
-# Widget Multiselect Sincronizzato
+    
 final_selection = st.sidebar.multiselect(
     "Gestisci titoli:",
     options=st.session_state['selected_tickers_list'],
-    key="multiselect_portfolio" # Questa chiave collega il widget allo stato modificato sopra
+    key="multiselect_portfolio"
 )
 
-# Sincronizzazione inversa: se l'utente toglie la spunta, aggiorniamo la lista opzioni
 if set(final_selection) != set(st.session_state['selected_tickers_list']):
     st.session_state['selected_tickers_list'] = final_selection
-    # Non serve rerun qui, lo fa streamlit in automatico al cambio valore
+    # No rerun here to avoid loop
 
 st.sidebar.markdown("---")
 
-# 3. PARAMETRI
+# PARAMETRI
 st.sidebar.subheader("2. Parametri Analisi")
-
-# A. Benchmark
 bench_display_options = list(BENCHMARK_DICT.values())
-selected_bench_display = st.sidebar.selectbox(
-    "Benchmark di Riferimento:", 
-    bench_display_options,
-    index=0,
-    key="bench_selector"
-)
+selected_bench_display = st.sidebar.selectbox("Benchmark:", bench_display_options, index=0)
 benchmark_ticker = next((k for k, v in BENCHMARK_DICT.items() if v == selected_bench_display), None)
 
-# B. Frequenza
-freq_option = st.sidebar.selectbox(
-    "Frequenza Dati:",
-    ["Settimanale (Consigliato)", "Mensile"],
-    index=0
-)
+freq_option = st.sidebar.selectbox("Frequenza:", ["Settimanale (Consigliato)", "Mensile"], index=0)
 interval_code = "1wk" if "Settimanale" in freq_option else "1mo"
 
-# C. Date
-st.sidebar.markdown("**Periodo di Analisi:**")
 col_d1, col_d2 = st.sidebar.columns(2)
 years_back = 5 if interval_code == "1mo" else 2
 default_start = datetime.date.today() - datetime.timedelta(days=365*years_back)
 
-with col_d1:
-    start_date = st.date_input("Data Inizio", value=default_start)
-with col_d2:
-    end_date = st.date_input("Data Fine", value=datetime.date.today())
+with col_d1: start_date = st.date_input("Data Inizio", value=default_start)
+with col_d2: end_date = st.date_input("Data Fine", value=datetime.date.today())
 
-# D. Macro
 rf_input = st.sidebar.number_input("Risk Free (BTP 10Y)", value=3.8, step=0.1) / 100
 mrp_input = st.sidebar.number_input("Market Risk Premium", value=5.5, step=0.1) / 100
 
 # =========================
-# MOTORE DI CALCOLO
+# MOTORE DI CALCOLO (FIX DEFINITIVO)
 # =========================
 
 def get_data_single_dates(ticker, start, end, interval):
+    """
+    Tenta di scaricare usando Ticker object che è più stabile di download()
+    """
     try:
-        session = get_yahoo_session()
-        df = yf.download(
-            ticker, start=start, end=end, interval=interval, 
-            auto_adjust=False, progress=False, session=session
-        )
+        # Metodo 1: Ticker History (Più robusto sui singoli titoli)
+        dat = yf.Ticker(ticker)
+        df = dat.history(start=start, end=end, interval=interval, auto_adjust=False)
+        
+        # Se vuoto, proviamo Metodo 2: Download classico con override
+        if df.empty:
+            df = yf.download(ticker, start=start, end=end, interval=interval, auto_adjust=False, progress=False)
+            
         if df.empty: return None
         
+        # Pulizia
         df.index = df.index.normalize()
         
+        # Gestione colonne MultiIndex
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        # Trova Close
         if "Close" in df.columns: price_col = df["Close"]
         elif "Adj Close" in df.columns: price_col = df["Adj Close"]
         else: return None 
@@ -205,13 +181,14 @@ def get_data_single_dates(ticker, start, end, interval):
             "Minimo": get_col("Low"),
             "Volume": get_col("Volume")
         })
-    except: return None
+    except Exception as e:
+        return None
 
 def get_data_pair_robust(ticker, benchmark, start, end, interval):
     df_asset = get_data_single_dates(ticker, start, end, interval)
     df_bench = get_data_single_dates(benchmark, start, end, interval)
     
-    if df_asset is None and df_bench is None: return None, None, "Errore Totale: Nessun dato disponibile."
+    if df_asset is None and df_bench is None: return None, None, "Errore Totale: Nessun dato disponibile (Controlla connessione)."
     if df_asset is None: return None, None, f"Errore Ticker: {ticker} non risponde."
     if df_bench is None: return None, None, f"Errore Benchmark: {benchmark} non scaricabile."
 
