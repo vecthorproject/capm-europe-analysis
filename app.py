@@ -6,35 +6,105 @@ import plotly.express as px
 import io
 import requests
 import datetime
-import logging
+import json
 
 # =========================
-# CONFIGURAZIONE
+# CONFIGURAZIONE PAGINA
 # =========================
 st.set_page_config(page_title="Analisi Beta Pro", layout="wide")
-logging.basicConfig(level=logging.INFO)
 
 st.title("🇪🇺 Analisi Finanziaria: Focus Europa & Italia")
 st.markdown("""
-Strumento professionale per il calcolo del **Beta** e del **Costo del Capitale (CAPM)**  
-Sistema **robusto a fallback multipli** per il recupero dati.
+Strumento professionale per il calcolo del **Beta** e del **Costo del Capitale**.
+**Sistema Blindato:** Include 3 livelli di recupero dati (Libreria -> API Diretta -> Provider Alternativo).
 """)
 
 # =========================
-# SESSION STATE
+# GESTIONE STATO
 # =========================
-for k in ["selected_tickers_list", "ticker_names_map", "multiselect_portfolio"]:
-    if k not in st.session_state:
-        st.session_state[k] = [] if "list" in k or "portfolio" in k else {}
+if 'selected_tickers_list' not in st.session_state:
+    st.session_state['selected_tickers_list'] = []
+if 'ticker_names_map' not in st.session_state:
+    st.session_state['ticker_names_map'] = {}
+if 'multiselect_portfolio' not in st.session_state:
+    st.session_state['multiselect_portfolio'] = []
 
 # =========================
-# UTILS
+# HELPER: SESSIONI & API DIRETTA
 # =========================
 def get_session():
-    s = requests.Session()
-    s.headers.update({"User-Agent": "Mozilla/5.0"})
-    return s
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    })
+    return session
 
+def download_yahoo_direct_json(ticker, interval, period_str):
+    try:
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?interval={interval}&range={period_str}"
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        data = r.json()
+
+        if data.get("chart", {}).get("result"):
+            res = data["chart"]["result"][0]
+            ts = res["timestamp"]
+            q = res["indicators"]["quote"][0]
+
+            df = pd.DataFrame({
+                "Ultimo": q["close"],
+                "Apertura": q["open"],
+                "Massimo": q["high"],
+                "Minimo": q["low"],
+                "Volume": q["volume"]
+            }, index=pd.to_datetime(ts, unit="s"))
+
+            return df
+    except:
+        return None
+    return None
+
+# =========================
+# MOTORE DI RICERCA
+# =========================
+def search_yahoo_finance(query):
+    if not query or len(query) < 2:
+        return []
+    try:
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}"
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        data = r.json()
+        results = []
+
+        europe_exchanges = ['MIL', 'PAR', 'GER', 'LSE', 'AMS', 'MCE', 'LIS', 'WSE', 'VIE', 'MTA']
+
+        for item in data.get("quotes", []):
+            symbol = item.get("symbol")
+            name = item.get("longname") or item.get("shortname")
+            exchange = item.get("exchange")
+
+            if symbol and name and (
+                exchange in europe_exchanges or
+                symbol.endswith(('.MI', '.DE', '.PA', '.MC', '.AS'))
+            ):
+                results.append((f"{name} ({symbol}) - {exchange}", symbol, name))
+        return results
+    except:
+        return []
+
+# =========================
+# DATABASE INDICI
+# =========================
+BENCHMARK_DICT = {
+    "FTSEMIB.MI": "🇮🇹 FTSE MIB (Yahoo Finance)",
+    "STOOQ_ALLSHARE": "🇮🇹 FTSE Italia All-Share (Fonte: Stooq)",
+    "^STOXX50E": "🇪🇺 Euro Stoxx 50 (Europa)",
+    "^GDAXI": "🇩🇪 DAX 40 (Germania)",
+    "^FCHI": "🇫🇷 CAC 40 (Francia)"
+}
+
+# =========================
+# CLEAN DATAFRAME
+# =========================
 def clean_dataframe(df):
     if df is None or df.empty:
         return None
@@ -44,193 +114,82 @@ def clean_dataframe(df):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    price = None
-    for c in ["Adj Close", "Close", "Ultimo"]:
-        if c in df.columns:
-            price = df[c]
-            break
+    price = df["Adj Close"] if "Adj Close" in df.columns else df.get("Close") or df.get("Ultimo")
     if price is None:
         return None
 
-    def col(name):
-        return df[name] if name in df.columns else pd.Series(price.values, index=df.index)
-
     return pd.DataFrame({
         "Ultimo": price,
-        "Apertura": col("Open"),
-        "Massimo": col("High"),
-        "Minimo": col("Low"),
+        "Apertura": df["Open"] if "Open" in df.columns else price,
+        "Massimo": df["High"] if "High" in df.columns else price,
+        "Minimo": df["Low"] if "Low" in df.columns else price,
         "Volume": df["Volume"] if "Volume" in df.columns else pd.Series(0, index=df.index)
     }).dropna()
 
 # =========================
-# DATA DOWNLOAD
+# DATA SMART
 # =========================
-@st.cache_data(ttl=3600)
-def yahoo_json_direct(ticker, period, interval):
-    try:
-        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range={period}&interval={interval}"
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
-        res = r.json()["chart"]["result"][0]
-        ts = res["timestamp"]
-        q = res["indicators"]["quote"][0]
-
-        df = pd.DataFrame({
-            "Ultimo": q["close"],
-            "Apertura": q["open"],
-            "Massimo": q["high"],
-            "Minimo": q["low"],
-            "Volume": q["volume"]
-        }, index=pd.to_datetime(ts, unit="s"))
-
-        return clean_dataframe(df)
-    except Exception as e:
-        logging.warning(f"Yahoo JSON failed {ticker}: {e}")
-        return None
-
-@st.cache_data(ttl=3600)
 def get_data_yahoo_smart(ticker, start, end, interval):
     session = get_session()
     years = max(1, int((end - start).days / 365) + 1)
-    period = f"{min(years, 10)}y"
+    period_str = f"{min(years, 10)}y"
 
     try:
         df = yf.Ticker(ticker, session=session).history(
             start=start, end=end, interval=interval, auto_adjust=False
         )
-        df = clean_dataframe(df)
-        if df is not None:
-            return df
+        clean = clean_dataframe(df)
+        if clean is not None:
+            return clean
     except:
         pass
 
     try:
         df = yf.download(
-            ticker, start=start, end=end,
-            interval=interval, progress=False, session=session
+            ticker, start=start, end=end, interval=interval,
+            auto_adjust=False, progress=False, session=session
         )
-        df = clean_dataframe(df)
-        if df is not None:
-            return df
+        clean = clean_dataframe(df)
+        if clean is not None:
+            return clean
     except:
         pass
 
-    df = yahoo_json_direct(ticker, period, interval)
+    df = download_yahoo_direct_json(ticker, interval, period_str)
     if df is not None:
-        return df.loc[(df.index >= start) & (df.index <= end)]
+        df = df.loc[(df.index >= start) & (df.index <= end)]
+        return clean_dataframe(df)
 
     return None
 
-@st.cache_data(ttl=3600)
-def get_data_stooq(symbol, start, end, interval):
-    try:
-        url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
-        df = pd.read_csv(url)
-        df["Date"] = pd.to_datetime(df["Date"])
-        df = df.set_index("Date").sort_index()
-        df = df.loc[start:end]
-
-        rule = "W-FRI" if interval == "1wk" else "M"
-        df = df.resample(rule).agg({
-            "Close": "last",
-            "Open": "first",
-            "High": "max",
-            "Low": "min",
-            "Volume": "sum"
-        }).dropna()
-
-        df = df.rename(columns={
-            "Close": "Ultimo", "Open": "Apertura",
-            "High": "Massimo", "Low": "Minimo"
-        })
-        return clean_dataframe(df)
-    except:
-        return None
-
 # =========================
-# ANALYTICS
+# CALCOLO METRICHE
 # =========================
-def align_pair(asset, bench):
-    df = asset.join(bench, how="inner", lsuffix="_a", rsuffix="_b")
-    return (
-        df[["Ultimo_a"]].rename(columns={"Ultimo_a": "Ultimo"}),
-        df[["Ultimo_b"]].rename(columns={"Ultimo_b": "Ultimo"})
-    )
+def calculate_metrics(df_asset, df_bench, rf, mrp, interval):
+    df = pd.concat([
+        df_asset["Ultimo"].pct_change(),
+        df_bench["Ultimo"].pct_change()
+    ], axis=1).dropna()
 
-def calculate_metrics(asset, bench, rf, mrp, interval):
-    asset["Ret"] = asset["Ultimo"].pct_change()
-    bench["Ret"] = bench["Ultimo"].pct_change()
-
-    df = pd.concat([asset["Ret"], bench["Ret"]], axis=1).dropna()
     min_obs = 24 if interval == "1wk" else 36
     if len(df) < min_obs:
-        return None
+        return None, None, None
 
-    cov = df.cov().iloc[0,1]
-    var = df.iloc[:,1].var()
+    cov = df.cov().iloc[0, 1]
+    var = df.iloc[:, 1].var()
+
     beta = cov / var if var != 0 else np.nan
+    exp_ret = rf + beta * mrp
 
-    return {
+    df_asset["Var %"] = df.iloc[:, 0]
+    df_bench["Var %"] = df.iloc[:, 1]
+
+    return df_asset, df_bench, {
         "Beta": beta,
         "Covarianza": cov,
         "Varianza": var,
-        "Exp Return": rf + beta * mrp
+        "Exp Return": exp_ret
     }
-
-# =========================
-# BENCHMARK
-# =========================
-BENCHMARKS = {
-    "FTSEMIB.MI": "🇮🇹 FTSE MIB",
-    "^STOXX50E": "🇪🇺 Euro Stoxx 50",
-    "^GDAXI": "🇩🇪 DAX 40",
-    "^FCHI": "🇫🇷 CAC 40"
-}
-
-# =========================
-# SIDEBAR
-# =========================
-st.sidebar.header("⚙️ Parametri")
-
-benchmark = st.sidebar.selectbox("Benchmark", list(BENCHMARKS.keys()))
-freq = st.sidebar.selectbox("Frequenza", ["Settimanale", "Mensile"])
-interval = "1wk" if freq == "Settimanale" else "1mo"
-
-start = st.sidebar.date_input("Data Inizio", datetime.date.today() - datetime.timedelta(days=365*5))
-end = st.sidebar.date_input("Data Fine", datetime.date.today())
-
-rf = st.sidebar.number_input("Risk Free (%)", value=3.8) / 100
-mrp = st.sidebar.number_input("Market Risk Premium (%)", value=5.5) / 100
-
-tickers = st.sidebar.text_area("Tickers (uno per riga)", "ENEL.MI\nENI.MI").split()
-
-# =========================
-# RUN
-# =========================
-if st.button("🚀 Avvia Analisi", type="primary"):
-    results = []
-
-    for t in tickers:
-        asset = get_data_yahoo_smart(t.strip(), start, end, interval)
-        bench = get_data_yahoo_smart(benchmark, start, end, interval)
-
-        if asset is None or bench is None:
-            st.error(f"{t}: errore download dati")
-            continue
-
-        asset, bench = align_pair(asset, bench)
-        stats = calculate_metrics(asset, bench, rf, mrp, interval)
-        if stats:
-            results.append({"Ticker": t, **stats})
-
-    if results:
-        df = pd.DataFrame(results)
-        st.subheader("📋 Risultati")
-        st.dataframe(df, use_container_width=True)
-
-        fig = px.bar(df, x="Ticker", y="Beta", title="Beta per Titolo", text_auto=".2f")
-        fig.add_hline(y=1, line_dash="dash")
-        st.plotly_chart(fig, use_container_width=True)
 
 # =========================
 # RELAZIONE METODOLOGICA (Espansa e Aggiornata)
