@@ -309,26 +309,63 @@ if st.session_state.get('done'):
     )
 
 # =========================
-# RELAZIONE METODOLOGICA
+# RELAZIONE METODOLOGICA (Espansa e Aggiornata)
 # =========================
 st.markdown("---")
-with st.expander("📚 Metodologia e Fonte Dati"):
+st.header("📚 Documentazione Tecnica e Metodologica")
+
+with st.expander("📖 Leggi la Relazione Completa (Metodologia, Indici e Formule)"):
     st.markdown(r"""
-    ### 1. Selezione Benchmark
-    L'utente può selezionare l'indice di riferimento (Benchmark) per il calcolo del Beta.
+    ### 1. Scopo dell'Analisi
+    Questo strumento è progettato per stimare il **Costo del Capitale Proprio (Ke)** e il **Rischio Sistematico (Beta)** di un portafoglio di titoli, confrontandoli dinamicamente con un indice di mercato (Benchmark) a scelta dell'utente.
     
-    * **FTSE MIB:** Indice delle 40 società italiane a maggiore capitalizzazione ("Blue Chips"). Rappresenta circa l'80% della capitalizzazione totale. Ideale per analizzare titoli grandi (es. Enel, Eni).
-    * **FTSE Italia All-Share:** Indice comprensivo che include FTSE MIB, Mid Cap e Small Cap. Ideale se si analizzano titoli a bassa capitalizzazione per avere un confronto più ampio.
+    L'output finale è un report Excel professionale strutturato "Side-by-Side" (fianco a fianco), che permette una verifica puntuale della correlazione tra il singolo titolo e l'indice scelto settimana per settimana.
+
+    ---
+
+    ### 2. Selezione del Benchmark (Indici Italiani ed Internazionali)
+    Il modello non è limitato al mercato domestico, ma permette di scegliere tra diversi scenari di confronto a seconda della natura del titolo analizzato:
     
-    ### 2. Struttura dei Dati
-    Il report Excel generato offre una visualizzazione **Side-by-Side**:
-    * **Lato Sinistro:** Dati OHLCV e Rendimenti del Titolo selezionato.
-    * **Lato Destro:** Dati allineati del Benchmark scelto (es. FTSE MIB o All-Share).
+    #### A. Mercato Italia (Focus Domestico)
+    * **FTSE MIB:** Rappresenta le **40 società italiane** a maggiore capitalizzazione (Blue Chips, ~80% del mercato).
+        * *Uso:* Benchmark standard per titoli grandi e liquidi (es. Enel, Intesa, Eni).
+    * **FTSE Italia All-Share:** Include FTSE MIB + Mid Cap + Small Cap.
+        * *Uso:* Preferibile per analizzare titoli a media/piccola capitalizzazione, per un confronto con l'economia reale italiana più ampia.
+
+    #### B. Mercati Internazionali (Confronto Globale)
+    È possibile selezionare indici esteri per valutare la sensibilità di titoli multinazionali:
+    * **S&P 500 (USA):** Per confrontare titoli italiani quotati anche a New York o con forte export in America (es. Ferrari, Tenaris).
+    * **DAX (Germania) / CAC 40 (Francia):** Per confronti settoriali europei.
+    * **Euro Stoxx 50:** Per valutare il titolo nel contesto dei leader europei.
     
-    ### 3. Calcolo dei Parametri
-    * **Beta ($\beta$):** $\frac{Cov(R_{asset}, R_{benchmark})}{Var(R_{benchmark})}$
-    * **CAPM Return:** $R_f + \beta \times MRP$
-    
-    * **Risk-Free ($R_f$):** BTP Italia 10Y (Default ~3.8%).
-    * **MRP:** 5.5% (Survey Fernandez 2025).
+    ---
+
+    ### 3. Struttura dei Dati e Timeframe
+    * **Frequenza:** Dati **Settimanali (Weekly)**.
+        * *Motivazione:* Su un orizzonte di breve/medio periodo (2-5 anni), i dati settimanali offrono il miglior compromesso tra numero di osservazioni (statistica robusta, >100 obs) e riduzione del "rumore" (volatilità giornaliera eccessiva).
+    * **Layout Excel:** Il file generato espone i dati in modalità **Side-by-Side**: le colonne del Titolo sono affiancate a quelle dell'Indice selezionato (che cambia dinamicamente in base alla scelta dell'utente).
+
+    ---
+
+    ### 4. Il Motore Matematico (Calcolo del Beta)
+    Il tool calcola il **Beta ($\beta$)** replicando esplicitamente la metodologia accademica classica basata sui rendimenti:
+
+    $$ \beta = \frac{Cov(R_{asset}, R_{benchmark})}{Var(R_{benchmark})} $$
+
+    Dove:
+    * **$Cov$:** Covarianza tra i rendimenti settimanali del titolo e dell'indice scelto.
+    * **$Var$:** Varianza dei rendimenti settimanali dell'indice scelto.
+    * **$R$ (Rendimento):** Calcolato come Variazione Percentuale Semplice ($\frac{P_t - P_{t-1}}{P_{t-1}}$).
+
+    ---
+
+    ### 5. Costo del Capitale (CAPM)
+    Il rendimento atteso finale (**Expected Return**) è calcolato secondo il **Capital Asset Pricing Model**:
+
+    $$ E(R) = R_f + \beta \times (R_m - R_f) $$
+
+    I parametri macroeconomici utilizzati sono specifici per l'investitore domestico:
+    * **Risk-Free Rate ($R_f$):** Rendimento del **BTP Italia a 10 Anni** (Default impostato a ~3.8%). Si preferisce il BTP al Bund tedesco per incorporare il rischio-paese reale sopportato dall'investitore italiano.
+    * **Market Risk Premium ($MRP$):** Fissato al **5.5%**.
+        * *Fonte:* **Survey IESE Business School (Pablo Fernandez, 2025)**. Rappresenta il premio per il rischio azionario medio richiesto dagli investitori istituzionali per il mercato italiano.
     """)
