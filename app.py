@@ -25,6 +25,9 @@ if 'selected_tickers_list' not in st.session_state:
     st.session_state['selected_tickers_list'] = [] 
 if 'ticker_names_map' not in st.session_state:
     st.session_state['ticker_names_map'] = {}
+# Inizializziamo la chiave del widget se non esiste
+if 'multiselect_portfolio' not in st.session_state:
+    st.session_state['multiselect_portfolio'] = []
 
 # =========================
 # FIX SESSIONE YAHOO
@@ -65,11 +68,10 @@ def search_yahoo_finance(query):
     except: return []
 
 # =========================
-# DATABASE INDICI (CON FIX ETF)
+# DATABASE INDICI
 # =========================
 BENCHMARK_DICT = {
     "FTSEMIB.MI": "🇮🇹 FTSE MIB (Indice Ufficiale)",
-    # TRUCCO: Usiamo l'ETF 'Lyxor FTSE Italia All Cap' (ITAMIL.MI) al posto dell'indice rotto
     "ITAMIL.MI": "🇮🇹 FTSE Italia All-Share (Proxy ETF All Cap - Dati Sicuri)", 
     "^STOXX50E": "🇪🇺 Euro Stoxx 50 (Europa - Blue Chips)",
     "^GDAXI": "🇩🇪 DAX 40 (Germania)",
@@ -90,31 +92,45 @@ if search_query:
     if search_results:
         selected_tuple = st.sidebar.selectbox("Risultati trovati:", options=search_results, format_func=lambda x: x[0])
         
+        # --- LOGICA CORRETTA DI AGGIUNTA E SELEZIONE ---
         if st.sidebar.button("➕ Aggiungi al Portafoglio"):
             ticker_to_add = selected_tuple[1]
             clean_name = selected_tuple[2]
             
+            # 1. Aggiorna la lista delle opzioni disponibili
             if ticker_to_add not in st.session_state['selected_tickers_list']:
                 st.session_state['selected_tickers_list'].append(ticker_to_add)
+            
+            # 2. Aggiorna la mappa dei nomi
             st.session_state['ticker_names_map'][ticker_to_add] = clean_name
+            
+            # 3. CRUCIALE: Forza la selezione nel widget multiselect
+            # Recuperiamo cosa è selezionato ora e aggiungiamo il nuovo
+            current_selection = st.session_state.get('multiselect_portfolio', [])
+            if ticker_to_add not in current_selection:
+                st.session_state['multiselect_portfolio'] = current_selection + [ticker_to_add]
+            
             st.rerun()
 
 # 2. PORTAFOGLIO
 st.sidebar.markdown("---")
 st.sidebar.subheader("📋 Portafoglio Attivo")
+
+# Se la lista opzioni è vuota
 if not st.session_state['selected_tickers_list']:
     st.sidebar.info("La lista è vuota.")
-    
+
+# Widget Multiselect Sincronizzato
 final_selection = st.sidebar.multiselect(
     "Gestisci titoli:",
     options=st.session_state['selected_tickers_list'],
-    default=st.session_state['selected_tickers_list'],
-    key="multiselect_portfolio"
+    key="multiselect_portfolio" # Questa chiave collega il widget allo stato modificato sopra
 )
 
+# Sincronizzazione inversa: se l'utente toglie la spunta, aggiorniamo la lista opzioni
 if set(final_selection) != set(st.session_state['selected_tickers_list']):
     st.session_state['selected_tickers_list'] = final_selection
-    st.rerun()
+    # Non serve rerun qui, lo fa streamlit in automatico al cambio valore
 
 st.sidebar.markdown("---")
 
@@ -214,7 +230,6 @@ def calculate_metrics(df_asset, df_bench, rf, mrp, interval):
     df_asset["Var %"] = df_asset["Ultimo"].pct_change()
     df_bench["Var %"] = df_bench["Ultimo"].pct_change()
     
-    # Per visualizzazione excel
     df_asset["Rendimento %"] = df_asset["Var %"]
     df_bench["Rendimento %"] = df_bench["Var %"]
 
