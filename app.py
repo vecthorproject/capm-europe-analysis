@@ -13,57 +13,110 @@ st.set_page_config(page_title="Analisi Finanziaria Beta & CAPM", layout="wide")
 st.title("📊 Analisi Finanziaria: Beta, CAPM e Dati Storici")
 st.markdown("""
 Strumento professionale per il calcolo del **Costo del Capitale** e del **Rischio Sistematico (Beta)**.
-Confronto diretto (Side-by-Side) tra i titoli selezionati e l'indice di riferimento (Benchmark).
+I titoli italiani vengono recuperati **dinamicamente** da Wikipedia, ma puoi aggiungere qualsiasi ticker globale manualmente.
 """)
 
 # =========================
-# DATABASE INDICI E TITOLI
+# FUNZIONE RECUPERO DINAMICO LISTA (NO LISTA INTERNA)
 # =========================
+@st.cache_data
+def get_ftse_mib_tickers_dynamic():
+    """
+    Va su Wikipedia, legge la tabella del FTSE MIB e restituisce la lista pulita.
+    Nessuna lista hardcoded nel codice!
+    """
+    try:
+        # URL della pagina Wikipedia del FTSE MIB
+        url = "https://en.wikipedia.org/wiki/FTSE_MIB"
+        
+        # Pandas legge tutte le tabelle nella pagina
+        tables = pd.read_html(url)
+        
+        # Solitamente la tabella dei costituenti è la seconda (indice 1)
+        # Cerchiamo quella che ha la colonna "Ticker" o "Company"
+        df_list = tables[1] 
+        
+        # Pulizia: Wikipedia a volte mette "Ticker" o "Symbol". Adattiamo.
+        # Creiamo un dizionario {Ticker: Nome Azienda}
+        tickers_dict = {}
+        
+        # Iteriamo sulle righe della tabella scaricata
+        for index, row in df_list.iterrows():
+            # Cerchiamo di prendere il ticker e il nome
+            # Nota: La struttura di Wikipedia potrebbe cambiare, usiamo indici posizionali o nomi comuni
+            ticker = row.iloc[1] # Solitamente la seconda colonna è il Ticker
+            name = row.iloc[0]   # Solitamente la prima è il nome
+            
+            # Pulizia Ticker: Wikipedia spesso non mette .MI
+            if "MI" not in ticker:
+                ticker = f"{ticker}.MI"
+            
+            tickers_dict[ticker] = name
+            
+        return tickers_dict
 
-# Mappa dei principali indici mondiali (Nome Visualizzato -> Ticker Yahoo)
+    except Exception as e:
+        # Se Wikipedia cambia struttura o non c'è internet, fallback
+        st.warning(f"Impossibile scaricare la lista da Wikipedia ({e}). Usa l'inserimento manuale.")
+        return {}
+
+# Carichiamo la lista all'avvio
+DYNAMIC_TICKER_MAP = get_ftse_mib_tickers_dynamic()
+
+# =========================
+# DATABASE INDICI
+# =========================
 BENCHMARK_OPTIONS = {
-    "FTSE MIB (Italia 40 - Principale)": "FTSEMIB.MI",
-    "FTSE Italia All-Share (Tutto il listino)": "^FTITLMS",
-    "DAX (Germania 40)": "^GDAXI",
+    "FTSE MIB (Italia 40)": "FTSEMIB.MI",
+    "FTSE Italia All-Share": "^FTITLMS",
+    "DAX (Germania)": "^GDAXI",
     "CAC 40 (Francia)": "^FCHI",
     "S&P 500 (USA)": "^GSPC",
-    "Euro Stoxx 50 (Europa)": "^STOXX50E"
+    "Euro Stoxx 50 (Europa)": "^STOXX50E",
+    "Nasdaq 100 (Tech USA)": "^NDX"
 }
-
-# Lista titoli FTSE MIB precaricati
-FTSE_MIB_TICKERS = [
-    "A2A.MI", "AMP.MI", "AZM.MI", "BGN.MI", "BMED.MI", "BAMI.MI", "BPE.MI", 
-    "CPR.MI", "DIA.MI", "ENEL.MI", "ENI.MI", "ERG.MI", "RACE.MI", "FBK.MI", 
-    "G.MI", "HER.MI", "IP.MI", "ISP.MI", "INW.MI", "IG.MI", "IVG.MI", "LDO.MI", 
-    "MB.MI", "MONC.MI", "NEXI.MI", "PIRC.MI", "PST.MI", "PRY.MI", "REC.MI", 
-    "SPM.MI", "SRG.MI", "STLAM.MI", "STMMI.MI", "TEN.MI", "TRN.MI", "TIT.MI", 
-    "UCG.MI", "UNI.MI"
-]
 
 # =========================
 # SIDEBAR - INPUT
 # =========================
 st.sidebar.header("⚙️ Configurazione Analisi")
 
-# 1. Selezione Titoli (Asset)
+# 1. Selezione Titoli (Dinamica + Manuale)
 st.sidebar.subheader("1. Selezione Asset")
-selected_tickers = st.sidebar.multiselect(
-    "Scegli i titoli:",
-    options=FTSE_MIB_TICKERS,
-    default=["ENEL.MI"], 
-    help="Digita per cercare o seleziona dalla lista."
+
+# A. Menu a tendina (Popolato da Wikipedia)
+def format_func_ticker(option):
+    return f"{DYNAMIC_TICKER_MAP.get(option, option)} ({option})"
+
+selected_from_list = []
+if DYNAMIC_TICKER_MAP:
+    selected_from_list = st.sidebar.multiselect(
+        "A. Scegli dal FTSE MIB (Da Wikipedia):",
+        options=list(DYNAMIC_TICKER_MAP.keys()),
+        default=["ENEL.MI", "ISP.MI"] if "ENEL.MI" in DYNAMIC_TICKER_MAP else [],
+        format_func=format_func_ticker
+    )
+
+# B. Input Manuale (Libertà Totale)
+st.sidebar.markdown("**Oppure aggiungi ticker extra:**")
+manual_tickers_str = st.sidebar.text_input(
+    "B. Inserimento Manuale (es. RACE.MI, AAPL, TSLA)",
+    help="Inserisci ticker separati da virgola. Esempio: 'JUVE.MI' o 'NVDA'"
 )
+
+# Uniamo le due liste
+manual_tickers_list = [t.strip() for t in manual_tickers_str.split(',') if t.strip() != ""]
+final_tickers_list = list(set(selected_from_list + manual_tickers_list)) # Rimuove duplicati
 
 st.sidebar.markdown("---")
 
-# 2. Selezione Benchmark (Indice)
+# 2. Selezione Benchmark
 st.sidebar.subheader("2. Selezione Benchmark")
 selected_bench_name = st.sidebar.selectbox(
     "Confronta con Indice:",
     options=list(BENCHMARK_OPTIONS.keys()),
-    index=0 # Default: FTSE MIB
+    index=0 
 )
-# Recuperiamo il ticker vero (es. FTSEMIB.MI) dal nome scelto
 benchmark_ticker = BENCHMARK_OPTIONS[selected_bench_name]
 
 st.sidebar.markdown("---")
@@ -74,7 +127,7 @@ rf_input = st.sidebar.number_input("Risk Free Rate (BTP 10Y)", value=3.8, step=0
 mrp_input = st.sidebar.number_input("Market Risk Premium", value=5.5, step=0.1) / 100
 years_input = st.sidebar.slider("Orizzonte Temporale (Anni)", 1, 5, 2) 
 
-st.sidebar.info("Modifica i parametri e premi **Avvia Analisi**.")
+st.sidebar.info(f"Titoli selezionati: {len(final_tickers_list)}. Premi **Avvia Analisi**.")
 
 # =========================
 # MOTORE DI CALCOLO
@@ -82,51 +135,31 @@ st.sidebar.info("Modifica i parametri e premi **Avvia Analisi**.")
 
 @st.cache_data
 def get_data_pair(ticker, benchmark, years):
-    """Scarica i dati per una coppia Ticker-Benchmark e li allinea"""
     try:
         data = yf.download([ticker, benchmark], period=f"{years}y", interval="1wk", auto_adjust=False, progress=False)
-        
         try:
             closes = data["Close"][[ticker, benchmark]].dropna()
             opens = data["Open"][[ticker, benchmark]].dropna()
             highs = data["High"][[ticker, benchmark]].dropna()
             lows = data["Low"][[ticker, benchmark]].dropna()
             vols = data["Volume"][[ticker, benchmark]].dropna()
-        except KeyError:
-            return None, None
+        except KeyError: return None, None
 
         common_index = closes.index
-        
         df_asset = pd.DataFrame({
-            "Data": common_index,
-            "Ultimo": closes[ticker],
-            "Apertura": opens[ticker],
-            "Massimo": highs[ticker],
-            "Minimo": lows[ticker],
-            "Volume": vols[ticker]
+            "Data": common_index, "Ultimo": closes[ticker], "Apertura": opens[ticker],
+            "Massimo": highs[ticker], "Minimo": lows[ticker], "Volume": vols[ticker]
         }).set_index("Data")
-
         df_bench = pd.DataFrame({
-            "Data": common_index,
-            "Ultimo": closes[benchmark],
-            "Apertura": opens[benchmark],
-            "Massimo": highs[benchmark],
-            "Minimo": lows[benchmark],
-            "Volume": vols[benchmark]
+            "Data": common_index, "Ultimo": closes[benchmark], "Apertura": opens[benchmark],
+            "Massimo": highs[benchmark], "Minimo": lows[benchmark], "Volume": vols[benchmark]
         }).set_index("Data")
-        
         return df_asset, df_bench
-
-    except Exception as e:
-        return None, None
+    except Exception: return None, None
 
 def calculate_metrics_and_structure(df_asset, df_bench, rf, mrp, years):
-    """Calcola Beta, Var% e prepara i dati separati"""
-    
-    # Calcolo Rendimenti
     df_asset["Var %"] = df_asset["Ultimo"].pct_change()
     df_asset["Rendimento %"] = df_asset["Var %"]
-    
     df_bench["Var %"] = df_bench["Ultimo"].pct_change()
     df_bench["Rendimento %"] = df_bench["Var %"]
 
@@ -137,39 +170,25 @@ def calculate_metrics_and_structure(df_asset, df_bench, rf, mrp, years):
     df_asset = df_asset.loc[common_idx].sort_index(ascending=False)
     df_bench = df_bench.loc[common_idx].sort_index(ascending=False)
 
-    # Beta
-    y = df_asset["Var %"]
-    x = df_bench["Var %"]
-    
+    y, x = df_asset["Var %"], df_bench["Var %"]
     covariance = np.cov(y, x)[0][1]
     variance = np.var(x, ddof=1) 
     beta = covariance / variance
-    
     expected_return = rf + beta * mrp
     
-    stats = {
-        "Beta": beta,
-        "Covarianza": covariance,
-        "Varianza": variance,
-        "Exp Return": expected_return
-    }
-    
+    stats = {"Beta": beta, "Covarianza": covariance, "Varianza": variance, "Exp Return": expected_return}
     return df_asset, df_bench, stats
 
 def generate_excel_report(analysis_results, rf, mrp, bench_name):
-    """Genera Excel con NOME INDICE DINAMICO"""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        def fmt_pct(val): return f"{val * 100:.3f}%" if (not pd.isna(val) and not isinstance(val, str)) else val
         
-        def fmt_pct(val):
-            if pd.isna(val) or isinstance(val, str): return val
-            return f"{val * 100:.3f}%"
-        
-        # Foglio Sintesi
         summary_data = []
         for ticker, data in analysis_results.items():
+            full_name = DYNAMIC_TICKER_MAP.get(ticker, ticker) # Nome da Wikipedia se c'è
             summary_data.append({
-                "Ticker": ticker,
+                "Ragione Sociale": full_name, "Ticker": ticker,
                 "Beta": f"{data['stats']['Beta']:.3f}",
                 "Covarianza": f"{data['stats']['Covarianza']:.6f}",
                 "Varianza Mkt": f"{data['stats']['Varianza']:.6f}",
@@ -177,63 +196,38 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
             })
         pd.DataFrame(summary_data).to_excel(writer, sheet_name="Sintesi", index=False)
         
-        # Fogli Dettaglio
         for ticker, data in analysis_results.items():
             sheet_name = ticker.replace(".MI", "")[:30] 
-            
-            # Intestazione Metriche
-            risk_free_fmt = fmt_pct(rf)
-            mrp_fmt = fmt_pct(mrp)
-            capm_fmt = fmt_pct(data['stats']['Exp Return'])
+            full_name = DYNAMIC_TICKER_MAP.get(ticker, ticker)
             
             metrics_df = pd.DataFrame({
-                "METRICA": ["BETA", "COVARIANZA", "VARIANZA", "RISK FREE", "MRP", "CAPM RETURN"],
-                "VALORE": [
-                    f"{data['stats']['Beta']:.4f}",
-                    f"{data['stats']['Covarianza']:.6f}",
-                    f"{data['stats']['Varianza']:.6f}",
-                    risk_free_fmt,
-                    mrp_fmt,
-                    capm_fmt
-                ]
+                "METRICA": ["SOCIETÀ", "BETA", "COVARIANZA", "VARIANZA", "RISK FREE", "MRP", "CAPM RETURN"],
+                "VALORE": [full_name, f"{data['stats']['Beta']:.4f}", f"{data['stats']['Covarianza']:.6f}",
+                           f"{data['stats']['Varianza']:.6f}", fmt_pct(rf), fmt_pct(mrp), fmt_pct(data['stats']['Exp Return'])]
             })
             metrics_df.to_excel(writer, sheet_name=sheet_name, startrow=0, startcol=0, index=False)
             
-            # Dati Storici
-            df_asset_view = data['df_asset'].copy()
-            df_bench_view = data['df_bench'].copy()
-            
+            df_asset_view, df_bench_view = data['df_asset'].copy(), data['df_bench'].copy()
             for col in ["Var %", "Rendimento %"]:
-                if col in df_asset_view.columns:
-                    df_asset_view[col] = df_asset_view[col].apply(fmt_pct)
-                if col in df_bench_view.columns:
-                    df_bench_view[col] = df_bench_view[col].apply(fmt_pct)
+                if col in df_asset_view.columns: df_asset_view[col] = df_asset_view[col].apply(fmt_pct)
+                if col in df_bench_view.columns: df_bench_view[col] = df_bench_view[col].apply(fmt_pct)
 
-            workbook = writer.book
-            worksheet = writer.sheets[sheet_name]
-            
-            # Scrittura Side-by-Side
-            worksheet.cell(row=9, column=1, value=ticker) 
+            ws = writer.sheets[sheet_name]
+            ws.cell(row=9, column=1, value=f"{full_name} ({ticker})") 
             df_asset_view.to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=0)
-            
             offset = len(df_asset_view.columns) + 1 + 2 
-            # Qui usiamo il nome dinamico del benchmark scelto dall'utente
-            worksheet.cell(row=9, column=offset + 1, value=f"{bench_name} (Benchmark)")
+            ws.cell(row=9, column=offset + 1, value=f"{bench_name} (Benchmark)")
             df_bench_view.to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=offset)
             
-        # Auto-width
-        for sheet_name in writer.sheets:
-            worksheet = writer.sheets[sheet_name]
-            for column in worksheet.columns:
-                max_length = 0
-                column_letter = column[0].column_letter
-                for cell in column:
-                    try:
-                        if len(str(cell.value)) > max_length: max_length = len(str(cell.value))
+        for sheet in writer.sheets:
+            ws = writer.sheets[sheet]
+            for col in ws.columns:
+                max_len = 0
+                for cell in col:
+                    try: 
+                        if len(str(cell.value)) > max_len: max_len = len(str(cell.value))
                     except: pass
-                adjusted_width = (max_length + 2)
-                if adjusted_width < 12: adjusted_width = 12
-                worksheet.column_dimensions[column_letter].width = adjusted_width
+                ws.column_dimensions[col[0].column_letter].width = max(max_len + 2, 12)
             
     return output.getvalue()
 
@@ -242,32 +236,24 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
 # =========================
 if st.button("🚀 Avvia Analisi", type="primary"):
     
-    tickers_list = selected_tickers
-    
-    if not tickers_list:
-        st.error("⚠️ Seleziona almeno un titolo dalla lista.")
+    if not final_tickers_list:
+        st.error("⚠️ Inserisci almeno un titolo (dalla lista o manualmente).")
     else:
-        with st.spinner(f'Confronto titoli vs {selected_bench_name}...'):
+        with st.spinner(f'Analisi in corso...'):
             results = {}
-            
-            for t in tickers_list:
+            for t in final_tickers_list:
                 df_asset, df_bench = get_data_pair(t, benchmark_ticker, years_input)
-                
                 if df_asset is not None and not df_asset.empty:
                     df_a, df_b, stats = calculate_metrics_and_structure(df_asset, df_bench, rf_input, mrp_input, years_input)
-                    results[t] = {
-                        "df_asset": df_a,
-                        "df_bench": df_b,
-                        "stats": stats
-                    }
+                    results[t] = {"df_asset": df_a, "df_bench": df_b, "stats": stats}
             
             if results:
                 st.session_state['analysis_results'] = results
-                st.session_state['bench_used'] = selected_bench_name # Salviamo il nome del benchmark usato
+                st.session_state['bench_used'] = selected_bench_name 
                 st.session_state['done'] = True
-                st.toast(f'✅ Analisi completata con {selected_bench_name}!', icon="🚀")
+                st.toast(f'✅ Completato per {len(results)} ticker!', icon="🚀")
             else:
-                st.error("Impossibile scaricare i dati. Controlla la connessione.")
+                st.error("Nessun dato trovato. Controlla i ticker inseriti.")
 
 # =========================
 # VISUALIZZAZIONE
@@ -278,9 +264,9 @@ if st.session_state.get('done'):
     
     summary_list = []
     for t, data in results.items():
+        full_name = DYNAMIC_TICKER_MAP.get(t, t)
         summary_list.append({
-            "Ticker": t,
-            "Beta": data['stats']['Beta'],
+            "Società": full_name, "Ticker": t, "Beta": data['stats']['Beta'],
             "CAPM Return": f"{data['stats']['Exp Return']*100:.2f}%"
         })
     
@@ -291,22 +277,14 @@ if st.session_state.get('done'):
     with col1:
         st.subheader("Confronto Rischio (Beta)")
         beta_df = pd.DataFrame(summary_list)
-        fig = px.bar(beta_df, x="Ticker", y="Beta", text_auto=".2f", title=f"Beta vs {bench_name} (1.0)")
+        fig = px.bar(beta_df, x="Società", y="Beta", text_auto=".2f", title=f"Beta vs {bench_name} (1.0)")
         fig.add_hline(y=1, line_dash="dash", annotation_text="Mercato")
         st.plotly_chart(fig, use_container_width=True)
-    
     with col2:
-        st.info(f"Analisi basata sul confronto con **{bench_name}**.")
+        st.info(f"Benchmark utilizzato: **{bench_name}**.")
 
-    # Download Excel con parametro nome benchmark
     excel_file = generate_excel_report(results, rf_input, mrp_input, bench_name)
-    st.download_button(
-        label="📥 Scarica Report Excel",
-        data=excel_file,
-        file_name="Analisi_Finanziaria_Completa.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary"
-    )
+    st.download_button("📥 Scarica Report Excel", data=excel_file, file_name="Analisi_Finanziaria_Completa.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
 
 # =========================
 # RELAZIONE METODOLOGICA (Espansa e Aggiornata)
