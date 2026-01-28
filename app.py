@@ -15,20 +15,19 @@ st.set_page_config(page_title="Analisi Beta Pro", layout="wide")
 st.title("🇪🇺 Analisi Finanziaria: Focus Europa & Italia")
 st.markdown("""
 Strumento professionale per il calcolo del **Beta** e del **Costo del Capitale**.
-Seleziona date precise e frequenza di campionamento.
+**Nota:** Per l'All-Share utilizziamo un ETF "All Cap" come proxy per garantire la qualità dei dati.
 """)
 
 # =========================
-# GESTIONE STATO (SESSION STATE)
+# GESTIONE STATO
 # =========================
 if 'selected_tickers_list' not in st.session_state:
     st.session_state['selected_tickers_list'] = [] 
-
 if 'ticker_names_map' not in st.session_state:
     st.session_state['ticker_names_map'] = {}
 
 # =========================
-# CONFIGURAZIONE SESSIONE (FIX PER YAHOO)
+# FIX SESSIONE YAHOO
 # =========================
 def get_yahoo_session():
     session = requests.Session()
@@ -38,7 +37,7 @@ def get_yahoo_session():
     return session
 
 # =========================
-# 1. MOTORE DI RICERCA YAHOO
+# 1. MOTORE DI RICERCA
 # =========================
 def search_yahoo_finance(query):
     if not query or len(query) < 2: return []
@@ -66,22 +65,23 @@ def search_yahoo_finance(query):
     except: return []
 
 # =========================
-# DATABASE INDICI
+# DATABASE INDICI (CON FIX ETF)
 # =========================
 BENCHMARK_DICT = {
-    "FTSEMIB.MI": "🇮🇹 FTSE MIB (Italia - Consigliato)",
-    "^FTITLMS": "🇮🇹 FTSE Italia All-Share (Italia - Completo)",
+    "FTSEMIB.MI": "🇮🇹 FTSE MIB (Indice Ufficiale)",
+    # TRUCCO: Usiamo l'ETF 'Lyxor FTSE Italia All Cap' (ITAMIL.MI) al posto dell'indice rotto
+    "ITAMIL.MI": "🇮🇹 FTSE Italia All-Share (Proxy ETF All Cap - Dati Sicuri)", 
     "^STOXX50E": "🇪🇺 Euro Stoxx 50 (Europa - Blue Chips)",
     "^GDAXI": "🇩🇪 DAX 40 (Germania)",
     "^FCHI": "🇫🇷 CAC 40 (Francia)"
 }
 
 # =========================
-# SIDEBAR - CONFIGURAZIONE
+# SIDEBAR
 # =========================
 st.sidebar.header("⚙️ Configurazione")
 
-# --- 1. RICERCA TITOLI ---
+# 1. RICERCA
 st.sidebar.subheader("1. Cerca Titolo")
 search_query = st.sidebar.text_input("Nome azienda (es. Enel, Ferrari):", "")
 
@@ -90,53 +90,35 @@ if search_query:
     if search_results:
         selected_tuple = st.sidebar.selectbox("Risultati trovati:", options=search_results, format_func=lambda x: x[0])
         
-        # --- FIX BUG AGGIUNTA ---
         if st.sidebar.button("➕ Aggiungi al Portafoglio"):
             ticker_to_add = selected_tuple[1]
             clean_name = selected_tuple[2]
             
-            # 1. Aggiorna la lista dati
             if ticker_to_add not in st.session_state['selected_tickers_list']:
                 st.session_state['selected_tickers_list'].append(ticker_to_add)
-                # 2. Aggiorna la mappa nomi
-                st.session_state['ticker_names_map'][ticker_to_add] = clean_name
-                
-                # 3. FORZA L'AGGIORNAMENTO DEL WIDGET VISIVO SOTTOSTANTE
-                st.session_state['multiselect_portfolio'] = st.session_state['selected_tickers_list']
-                
-                # 4. Feedback visivo immediato
-                st.toast(f"✅ Aggiunto: {clean_name}", icon="💼")
-                
-                # 5. Ricarica la pagina per mostrare la lista aggiornata
-                st.rerun()
-            else:
-                st.toast(f"⚠️ {clean_name} è già nel portafoglio.", icon="info")
-    else:
-        st.sidebar.warning("Nessun risultato europeo trovato.")
+            st.session_state['ticker_names_map'][ticker_to_add] = clean_name
+            st.rerun()
 
-# --- 2. LISTA TITOLI ---
+# 2. PORTAFOGLIO
 st.sidebar.markdown("---")
 st.sidebar.subheader("📋 Portafoglio Attivo")
-
 if not st.session_state['selected_tickers_list']:
-    st.sidebar.info("La lista è vuota. Cerca un titolo sopra.")
+    st.sidebar.info("La lista è vuota.")
     
-# Il widget ora è sincronizzato con la session_state tramite la chiave
 final_selection = st.sidebar.multiselect(
     "Gestisci titoli:",
     options=st.session_state['selected_tickers_list'],
     default=st.session_state['selected_tickers_list'],
-    key="multiselect_portfolio" # CHIAVE FONDAMENTALE PER IL FIX
+    key="multiselect_portfolio"
 )
 
-# Se l'utente rimuove un titolo dalla lista manualmente
 if set(final_selection) != set(st.session_state['selected_tickers_list']):
     st.session_state['selected_tickers_list'] = final_selection
     st.rerun()
 
 st.sidebar.markdown("---")
 
-# --- 3. PARAMETRI E DATE ---
+# 3. PARAMETRI
 st.sidebar.subheader("2. Parametri Analisi")
 
 # A. Benchmark
@@ -152,15 +134,14 @@ benchmark_ticker = next((k for k, v in BENCHMARK_DICT.items() if v == selected_b
 # B. Frequenza
 freq_option = st.sidebar.selectbox(
     "Frequenza Dati:",
-    ["Settimanale (Consigliato)", "Mensile (Per All-Share)"],
+    ["Settimanale (Consigliato)", "Mensile"],
     index=0
 )
 interval_code = "1wk" if "Settimanale" in freq_option else "1mo"
 
-# C. Calendario
+# C. Date
 st.sidebar.markdown("**Periodo di Analisi:**")
 col_d1, col_d2 = st.sidebar.columns(2)
-
 years_back = 5 if interval_code == "1mo" else 2
 default_start = datetime.date.today() - datetime.timedelta(days=365*years_back)
 
@@ -169,10 +150,7 @@ with col_d1:
 with col_d2:
     end_date = st.date_input("Data Fine", value=datetime.date.today())
 
-if start_date >= end_date:
-    st.sidebar.error("Errore: La data di inizio deve essere precedente alla fine.")
-
-# D. Parametri Macro
+# D. Macro
 rf_input = st.sidebar.number_input("Risk Free (BTP 10Y)", value=3.8, step=0.1) / 100
 mrp_input = st.sidebar.number_input("Market Risk Premium", value=5.5, step=0.1) / 100
 
@@ -180,12 +158,13 @@ mrp_input = st.sidebar.number_input("Market Risk Premium", value=5.5, step=0.1) 
 # MOTORE DI CALCOLO
 # =========================
 
-@st.cache_data
 def get_data_single_dates(ticker, start, end, interval):
-    """Scarica dati con Sessione anti-blocco"""
     try:
-        session = get_yahoo_session() 
-        df = yf.download(ticker, start=start, end=end, interval=interval, auto_adjust=False, progress=False, session=session)
+        session = get_yahoo_session()
+        df = yf.download(
+            ticker, start=start, end=end, interval=interval, 
+            auto_adjust=False, progress=False, session=session
+        )
         if df.empty: return None
         
         df.index = df.index.normalize()
@@ -216,9 +195,9 @@ def get_data_pair_robust(ticker, benchmark, start, end, interval):
     df_asset = get_data_single_dates(ticker, start, end, interval)
     df_bench = get_data_single_dates(benchmark, start, end, interval)
     
-    if df_asset is None and df_bench is None: return None, None, "Errore Totale: Dati non disponibili (Yahoo blocca la richiesta)."
+    if df_asset is None and df_bench is None: return None, None, "Errore Totale: Nessun dato disponibile."
     if df_asset is None: return None, None, f"Errore Ticker: {ticker} non risponde."
-    if df_bench is None: return None, None, f"Errore Benchmark: {benchmark} non risponde."
+    if df_bench is None: return None, None, f"Errore Benchmark: {benchmark} non scaricabile."
 
     common_idx = df_asset.index.intersection(df_bench.index)
     
@@ -233,8 +212,10 @@ def get_data_pair_robust(ticker, benchmark, start, end, interval):
 
 def calculate_metrics(df_asset, df_bench, rf, mrp, interval):
     df_asset["Var %"] = df_asset["Ultimo"].pct_change()
-    df_asset["Rendimento %"] = df_asset["Var %"]
     df_bench["Var %"] = df_bench["Ultimo"].pct_change()
+    
+    # Per visualizzazione excel
+    df_asset["Rendimento %"] = df_asset["Var %"]
     df_bench["Rendimento %"] = df_bench["Var %"]
 
     df_asset = df_asset.dropna()
@@ -316,16 +297,17 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
     return output.getvalue()
 
 # =========================
-# LOGICA PRINCIPALE APP
+# LOGICA APP
 # =========================
-if st.button("🚀 Avvia Analisi", type="primary"):
+if st.button("🚀 Avvia Analisi (Aggiorna)", type="primary"):
+    st.cache_data.clear()
     
     if not final_selection:
-        st.error("⚠️ Inserisci almeno un titolo.")
+        st.error("⚠️ Lista titoli vuota.")
     elif start_date >= end_date:
-        st.error("⚠️ Controlla le date.")
+        st.error("⚠️ Date non valide.")
     else:
-        with st.spinner(f'Analisi in corso dal {start_date} al {end_date} ({freq_option})...'):
+        with st.spinner(f'Analisi in corso...'):
             results = {}
             error_log = []
             
@@ -343,17 +325,17 @@ if st.button("🚀 Avvia Analisi", type="primary"):
                 st.session_state['analysis_results'] = results
                 st.session_state['bench_used'] = selected_bench_display 
                 st.session_state['done'] = True
-                st.toast(f'✅ Completato!', icon="🚀")
+                st.toast(f'✅ Analisi aggiornata!', icon="🚀")
                 if error_log:
-                    with st.expander("⚠️ Avvisi sui dati"):
+                    with st.expander("⚠️ Problemi rilevati"):
                         for e in error_log: st.write(e)
             else:
-                st.error("Nessun dato valido trovato nel periodo selezionato.")
+                st.error("Nessun dato valido.")
                 if error_log:
                     for e in error_log: st.write(e)
 
 # =========================
-# VISUALIZZAZIONE RISULTATI
+# OUTPUT
 # =========================
 if st.session_state.get('done'):
     results = st.session_state['analysis_results']
