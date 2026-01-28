@@ -28,7 +28,17 @@ if 'ticker_names_map' not in st.session_state:
     st.session_state['ticker_names_map'] = {}
 
 # =========================
-# 1. MOTORE DI RICERCA YAHOO (Con Nomi Legali S.p.A.)
+# CONFIGURAZIONE SESSIONE (FIX PER YAHOO)
+# =========================
+def get_yahoo_session():
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    })
+    return session
+
+# =========================
+# 1. MOTORE DI RICERCA YAHOO
 # =========================
 def search_yahoo_finance(query):
     if not query or len(query) < 2: return []
@@ -43,8 +53,6 @@ def search_yahoo_finance(query):
         if 'quotes' in data:
             for item in data['quotes']:
                 symbol = item.get('symbol')
-                
-                # QUI LA MODIFICA: Cerchiamo PRIMA il longname (Enel S.p.A.) POI lo shortname
                 name = item.get('longname') or item.get('shortname')
                 exchange = item.get('exchange') 
                 
@@ -58,9 +66,8 @@ def search_yahoo_finance(query):
     except: return []
 
 # =========================
-# DATABASE INDICI (Stabile)
+# DATABASE INDICI
 # =========================
-# Dizionario semplificato per evitare bug di selezione
 BENCHMARK_DICT = {
     "FTSEMIB.MI": "🇮🇹 FTSE MIB (Italia - Consigliato)",
     "^FTITLMS": "🇮🇹 FTSE Italia All-Share (Italia - Completo)",
@@ -83,16 +90,27 @@ if search_query:
     if search_results:
         selected_tuple = st.sidebar.selectbox("Risultati trovati:", options=search_results, format_func=lambda x: x[0])
         
+        # --- FIX BUG AGGIUNTA ---
         if st.sidebar.button("➕ Aggiungi al Portafoglio"):
             ticker_to_add = selected_tuple[1]
-            clean_name = selected_tuple[2] # Questo ora contiene "Enel S.p.A."
+            clean_name = selected_tuple[2]
             
+            # 1. Aggiorna la lista dati
             if ticker_to_add not in st.session_state['selected_tickers_list']:
                 st.session_state['selected_tickers_list'].append(ticker_to_add)
-            
-            # Salviamo il nome formale
-            st.session_state['ticker_names_map'][ticker_to_add] = clean_name
-            st.rerun()
+                # 2. Aggiorna la mappa nomi
+                st.session_state['ticker_names_map'][ticker_to_add] = clean_name
+                
+                # 3. FORZA L'AGGIORNAMENTO DEL WIDGET VISIVO SOTTOSTANTE
+                st.session_state['multiselect_portfolio'] = st.session_state['selected_tickers_list']
+                
+                # 4. Feedback visivo immediato
+                st.toast(f"✅ Aggiunto: {clean_name}", icon="💼")
+                
+                # 5. Ricarica la pagina per mostrare la lista aggiornata
+                st.rerun()
+            else:
+                st.toast(f"⚠️ {clean_name} è già nel portafoglio.", icon="info")
     else:
         st.sidebar.warning("Nessun risultato europeo trovato.")
 
@@ -103,14 +121,15 @@ st.sidebar.subheader("📋 Portafoglio Attivo")
 if not st.session_state['selected_tickers_list']:
     st.sidebar.info("La lista è vuota. Cerca un titolo sopra.")
     
+# Il widget ora è sincronizzato con la session_state tramite la chiave
 final_selection = st.sidebar.multiselect(
     "Gestisci titoli:",
     options=st.session_state['selected_tickers_list'],
     default=st.session_state['selected_tickers_list'],
-    key="multiselect_portfolio"
+    key="multiselect_portfolio" # CHIAVE FONDAMENTALE PER IL FIX
 )
 
-# Sincronizzazione stato se l'utente rimuove dalla X
+# Se l'utente rimuove un titolo dalla lista manualmente
 if set(final_selection) != set(st.session_state['selected_tickers_list']):
     st.session_state['selected_tickers_list'] = final_selection
     st.rerun()
@@ -120,8 +139,7 @@ st.sidebar.markdown("---")
 # --- 3. PARAMETRI E DATE ---
 st.sidebar.subheader("2. Parametri Analisi")
 
-# A. Benchmark Selector (Rifatto robusto)
-# Usiamo i valori (nomi belli) come lista per la selectbox
+# A. Benchmark
 bench_display_options = list(BENCHMARK_DICT.values())
 selected_bench_display = st.sidebar.selectbox(
     "Benchmark di Riferimento:", 
@@ -129,7 +147,6 @@ selected_bench_display = st.sidebar.selectbox(
     index=0,
     key="bench_selector"
 )
-# Recuperiamo la chiave (Ticker) dal Valore (Nome)
 benchmark_ticker = next((k for k, v in BENCHMARK_DICT.items() if v == selected_bench_display), None)
 
 # B. Frequenza
@@ -140,11 +157,10 @@ freq_option = st.sidebar.selectbox(
 )
 interval_code = "1wk" if "Settimanale" in freq_option else "1mo"
 
-# C. Calendario (Date Picker)
+# C. Calendario
 st.sidebar.markdown("**Periodo di Analisi:**")
 col_d1, col_d2 = st.sidebar.columns(2)
 
-# Default: 2 anni fa per settimanale, 5 anni fa per mensile
 years_back = 5 if interval_code == "1mo" else 2
 default_start = datetime.date.today() - datetime.timedelta(days=365*years_back)
 
@@ -166,15 +182,14 @@ mrp_input = st.sidebar.number_input("Market Risk Premium", value=5.5, step=0.1) 
 
 @st.cache_data
 def get_data_single_dates(ticker, start, end, interval):
-    """Scarica dati con date precise"""
+    """Scarica dati con Sessione anti-blocco"""
     try:
-        # yfinance vuole le date come stringhe o datetime
-        df = yf.download(ticker, start=start, end=end, interval=interval, auto_adjust=False, progress=False)
+        session = get_yahoo_session() 
+        df = yf.download(ticker, start=start, end=end, interval=interval, auto_adjust=False, progress=False, session=session)
         if df.empty: return None
         
         df.index = df.index.normalize()
         
-        # Gestione Colonne
         if "Close" in df.columns: price_col = df["Close"]
         elif "Adj Close" in df.columns: price_col = df["Adj Close"]
         else: return None 
@@ -201,11 +216,10 @@ def get_data_pair_robust(ticker, benchmark, start, end, interval):
     df_asset = get_data_single_dates(ticker, start, end, interval)
     df_bench = get_data_single_dates(benchmark, start, end, interval)
     
-    if df_asset is None and df_bench is None: return None, None, "Errore Totale: Dati non disponibili."
+    if df_asset is None and df_bench is None: return None, None, "Errore Totale: Dati non disponibili (Yahoo blocca la richiesta)."
     if df_asset is None: return None, None, f"Errore Ticker: {ticker} non risponde."
     if df_bench is None: return None, None, f"Errore Benchmark: {benchmark} non risponde."
 
-    # Intersezione Date
     common_idx = df_asset.index.intersection(df_bench.index)
     
     min_obs = 6 if interval == "1mo" else 10
@@ -248,7 +262,6 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         def fmt_pct(val): return f"{val * 100:.3f}%" if (not pd.isna(val) and isinstance(val, (int, float))) else val
         
-        # FOGLIO SINTESI
         summary_data = []
         for ticker, data in analysis_results.items():
             full_name = st.session_state['ticker_names_map'].get(ticker, ticker)
@@ -262,7 +275,6 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
             })
         pd.DataFrame(summary_data).to_excel(writer, sheet_name="Sintesi", index=False)
         
-        # FOGLI DETTAGLIO
         for ticker, data in analysis_results.items():
             sheet_name = ticker.replace(".MI", "").replace("^", "")[:30] 
             full_name = st.session_state['ticker_names_map'].get(ticker, ticker)
@@ -277,24 +289,18 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
             df_asset_view = data['df_asset'].copy()
             df_bench_view = data['df_bench'].copy()
             
-            # Formattazione % Colonne
             for col in ["Var %", "Rendimento %"]:
                 if col in df_asset_view.columns: df_asset_view[col] = df_asset_view[col].apply(fmt_pct)
                 if col in df_bench_view.columns: df_bench_view[col] = df_bench_view[col].apply(fmt_pct)
 
             ws = writer.sheets[sheet_name]
             
-            # Intestazioni chiare
             ws.cell(row=9, column=1, value=f"{full_name} ({ticker})") 
             df_asset_view.to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=0)
-            
             offset = len(df_asset_view.columns) + 1 + 2 
             ws.cell(row=9, column=offset + 1, value=f"{bench_name} (Benchmark)")
             df_bench_view.to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=offset)
             
-        # FORMATTAZIONE COLONNE (FIX ####)
-        for sheet in writer.sheets:
-            ws = writer.sheets[sheet]
             for col in ws.columns:
                 max_len = 0
                 for cell in col:
@@ -303,10 +309,8 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
                         if len(val_str) > max_len: max_len = len(val_str)
                     except: pass
                 
-                # Moltiplicatore AUMENTATO per sicurezza totale contro ####
-                adjusted_width = (max_len * 1.7) + 6 
-                if adjusted_width < 22: adjusted_width = 22 # Minimo molto largo
-                
+                adjusted_width = (max_len * 1.7) + 6
+                if adjusted_width < 25: adjusted_width = 25
                 ws.column_dimensions[col[0].column_letter].width = adjusted_width
             
     return output.getvalue()
@@ -326,7 +330,6 @@ if st.button("🚀 Avvia Analisi", type="primary"):
             error_log = []
             
             for t in final_selection:
-                # Chiamata con date precise
                 df_asset, df_bench, err_msg = get_data_pair_robust(t, benchmark_ticker, start_date, end_date, interval_code)
                 
                 if df_asset is not None:
@@ -358,7 +361,6 @@ if st.session_state.get('done'):
     
     summary_list = []
     for t, data in results.items():
-        # Usiamo il nome legale completo
         full_name = st.session_state['ticker_names_map'].get(t, t)
         summary_list.append({
             "Società": full_name, "Ticker": t, "Beta": data['stats']['Beta'],
@@ -372,7 +374,6 @@ if st.session_state.get('done'):
     with col1:
         st.subheader("Confronto Rischio")
         beta_df = pd.DataFrame(summary_list)
-        # Grafico con Nomi Società
         fig = px.bar(beta_df, x="Società", y="Beta", text_auto=".2f", title=f"Beta vs {bench_name} (1.0)")
         fig.add_hline(y=1, line_dash="dash", annotation_text="Mercato")
         st.plotly_chart(fig, use_container_width=True)
