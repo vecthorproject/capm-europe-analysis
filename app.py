@@ -50,7 +50,7 @@ st.sidebar.subheader("1. Selezione Asset")
 selected_tickers = st.sidebar.multiselect(
     "Scegli i titoli:",
     options=FTSE_MIB_TICKERS,
-    default=["ENEL.MI", "ISP.MI", "ENI.MI"], 
+    default=["ENEL.MI"], 
     help="Digita per cercare o seleziona dalla lista."
 )
 
