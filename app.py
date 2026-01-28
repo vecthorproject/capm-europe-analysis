@@ -12,18 +12,36 @@ st.set_page_config(page_title="Analisi Finanziaria Beta & CAPM", layout="wide")
 
 st.title("📊 Analisi Finanziaria: Beta, CAPM e Dati Storici")
 st.markdown("""
-Strumento di calcolo del **Costo del Capitale** e del **Rischio Sistematico (Beta)**.
-Confronto diretto (Side-by-Side) tra Asset e Benchmark (FTSE MIB) su base settimanale.
+Strumento professionale per il calcolo del **Costo del Capitale** e del **Rischio Sistematico (Beta)**.
+Confronto diretto (Side-by-Side) tra i titoli del **Paniere FTSE MIB** e il Benchmark di mercato.
 """)
+
+# =========================
+# LISTA TITOLI (FTSE MIB)
+# =========================
+FTSE_MIB_TICKERS = [
+    "A2A.MI", "AMP.MI", "AZM.MI", "BGN.MI", "BMED.MI", "BAMI.MI", "BPE.MI", 
+    "CPR.MI", "DIA.MI", "ENEL.MI", "ENI.MI", "ERG.MI", "RACE.MI", "FBK.MI", 
+    "G.MI", "HER.MI", "IP.MI", "ISP.MI", "INW.MI", "IG.MI", "IVG.MI", "LDO.MI", 
+    "MB.MI", "MONC.MI", "NEXI.MI", "PIRC.MI", "PST.MI", "PRY.MI", "REC.MI", 
+    "SPM.MI", "SRG.MI", "STLAM.MI", "STMMI.MI", "TEN.MI", "TRN.MI", "TIT.MI", 
+    "UCG.MI", "UNI.MI"
+]
 
 # =========================
 # SIDEBAR - INPUT
 # =========================
 st.sidebar.header("⚙️ Configurazione Analisi")
 
-# Input dinamico: Streamlit legge questo valore ogni volta che clicchi il bottone
-default_tickers = "ENEL.MI, ISP.MI, ENI.MI"
-user_tickers = st.sidebar.text_area("Ticker (es. ENEL.MI, ISP.MI)", default_tickers, height=100)
+# Input dinamico: Multiselect con ricerca
+st.sidebar.subheader("Selezione Titoli")
+selected_tickers = st.sidebar.multiselect(
+    "Scegli i titoli dal paniere FTSE MIB:",
+    options=FTSE_MIB_TICKERS,
+    default=["ENEL.MI", "ISP.MI", "ENI.MI"], # Default attivi all'avvio
+    help="Puoi digitare per cercare (es. 'Ferrari') o selezionare dalla lista."
+)
+
 benchmark_ticker = "FTSEMIB.MI"
 
 st.sidebar.markdown("---")
@@ -32,7 +50,7 @@ rf_input = st.sidebar.number_input("Risk Free Rate (BTP 10Y)", value=3.8, step=0
 mrp_input = st.sidebar.number_input("Market Risk Premium (Fernandez)", value=5.5, step=0.1) / 100
 years_input = st.sidebar.slider("Orizzonte Temporale (Anni)", 1, 5, 2) 
 
-st.sidebar.info("Modifica i Ticker e premi **Avvia Analisi** per aggiornare.")
+st.sidebar.info("Modifica la selezione e premi **Avvia Analisi**.")
 
 # =========================
 # MOTORE DI CALCOLO
@@ -129,7 +147,6 @@ def generate_excel_report(analysis_results, rf, mrp):
         
         # --- Helper per formattare in % ---
         def fmt_pct(val):
-            """Converte 0.05123 in '5.123%'"""
             if pd.isna(val) or isinstance(val, str): return val
             return f"{val * 100:.3f}%"
         
@@ -167,11 +184,10 @@ def generate_excel_report(analysis_results, rf, mrp):
             })
             metrics_df.to_excel(writer, sheet_name=sheet_name, startrow=0, startcol=0, index=False)
             
-            # --- 2. Preparazione Dati Storici (Formattazione Colonne) ---
+            # --- 2. Preparazione Dati Storici ---
             df_asset_view = data['df_asset'].copy()
             df_bench_view = data['df_bench'].copy()
             
-            # Formattiamo le colonne percentuali in stringhe leggibili
             cols_to_format = ["Var %", "Rendimento %"]
             for col in cols_to_format:
                 if col in df_asset_view.columns:
@@ -182,17 +198,16 @@ def generate_excel_report(analysis_results, rf, mrp):
             workbook = writer.book
             worksheet = writer.sheets[sheet_name]
             
-            # --- SCRITTURA BLOCCO SINISTRO (ASSET) ---
+            # SCRITTURA BLOCCHI
             worksheet.cell(row=9, column=1, value=ticker) 
             df_asset_view.to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=0)
             
-            # --- SCRITTURA BLOCCO DESTRO (MERCATO) ---
-            offset = len(df_asset_view.columns) + 1 + 2 # +1 Index, +2 Spazio
+            offset = len(df_asset_view.columns) + 1 + 2 
             worksheet.cell(row=9, column=offset + 1, value="FTSE MIB (Benchmark)")
             df_bench_view.to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=offset)
             
         # ==========================================
-        # AUTO-ADJUST COLUMNS (Anti ####)
+        # AUTO-ADJUST COLUMNS
         # ==========================================
         for sheet_name in writer.sheets:
             worksheet = writer.sheets[sheet_name]
@@ -216,38 +231,36 @@ def generate_excel_report(analysis_results, rf, mrp):
 # =========================
 if st.button("🚀 Avvia Analisi", type="primary"):
     
-    # 1. Recuperiamo i ticker SCRITTI al momento del click (non quelli vecchi)
-    tickers_list = [t.strip() for t in user_tickers.split(',') if t.strip() != ""]
+    # 1. Recuperiamo i ticker dalla MULTISELECT (è già una lista!)
+    tickers_list = selected_tickers
     
-    with st.spinner(f'Analisi in corso per: {", ".join(tickers_list)}...'):
-        results = {}
-        
-        for t in tickers_list:
-            df_asset, df_bench = get_data_pair(t, benchmark_ticker, years_input)
+    if not tickers_list:
+        st.error("⚠️ Seleziona almeno un titolo dalla lista a sinistra.")
+    else:
+        with st.spinner(f'Analisi in corso per: {", ".join(tickers_list)}...'):
+            results = {}
             
-            if df_asset is not None and not df_asset.empty:
-                df_a, df_b, stats = calculate_metrics_and_structure(df_asset, df_bench, rf_input, mrp_input, years_input)
-                results[t] = {
-                    "df_asset": df_a,
-                    "df_bench": df_b,
-                    "stats": stats
-                }
-        
-        if results:
-            # 2. SOVRASCRIVIAMO lo stato precedente. Questo cancella i vecchi dati.
-            st.session_state['analysis_results'] = results
-            st.session_state['done'] = True
+            for t in tickers_list:
+                df_asset, df_bench = get_data_pair(t, benchmark_ticker, years_input)
+                
+                if df_asset is not None and not df_asset.empty:
+                    df_a, df_b, stats = calculate_metrics_and_structure(df_asset, df_bench, rf_input, mrp_input, years_input)
+                    results[t] = {
+                        "df_asset": df_a,
+                        "df_bench": df_b,
+                        "stats": stats
+                    }
             
-            # 3. Feedback Visivo (Toast) che conferma l'aggiornamento
-            st.toast(f'✅ Analisi completata per {len(results)} ticker!', icon="🚀")
-        else:
-            st.error("Nessun dato trovato. Controlla i ticker inseriti.")
+            if results:
+                st.session_state['analysis_results'] = results
+                st.session_state['done'] = True
+                st.toast(f'✅ Analisi completata per {len(results)} ticker!', icon="🚀")
+            else:
+                st.error("Impossibile scaricare i dati. Riprova più tardi.")
 
 # =========================
 # VISUALIZZAZIONE RISULTATI
 # =========================
-# Questo blocco viene rieseguito ogni volta che lo script gira.
-# Se abbiamo appena cliccato il bottone, 'analysis_results' contiene GIA' i nuovi dati.
 if st.session_state.get('done'):
     results = st.session_state['analysis_results']
     
@@ -273,12 +286,12 @@ if st.session_state.get('done'):
         st.plotly_chart(fig, use_container_width=True)
     
     with col2:
-        st.info("I risultati visualizzati sono basati sui dati appena aggiornati.")
+        st.info("Risultati calcolati sui titoli selezionati dal menu.")
 
-    # Download Excel (Rigenerato con i NUOVI dati)
+    # Download Excel
     excel_file = generate_excel_report(results, rf_input, mrp_input)
     st.download_button(
-        label="📥 Scarica Report Excel (Aggiornato)",
+        label="📥 Scarica Report Excel (Formattato)",
         data=excel_file,
         file_name="Analisi_Finanziaria_Completa.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -291,27 +304,23 @@ if st.session_state.get('done'):
 st.markdown("---")
 with st.expander("📚 Metodologia e Fonte Dati"):
     st.markdown(r"""
-    ### 1. Struttura dei Dati
-    L'analisi scarica e processa le serie storiche **settimanali** (Weekly timeframe) per garantire significatività statistica su orizzonti di breve/medio periodo (2-5 anni).
+    ### 1. Selezione Dati e Struttura
+    L'applicazione permette una selezione guidata tra i principali titoli del paniere **FTSE MIB**.
+    L'analisi processa serie storiche **settimanali** per garantire robustezza statistica.
     
-    Il file Excel generato presenta, per ogni titolo, una struttura **Side-by-Side** separata da due colonne vuote:
-    * **Lato Sinistro:** Intestato col nome del Ticker. Contiene Dati OHLCV e Rendimenti.
-    * **Lato Destro:** Intestato "FTSE MIB (Benchmark)". Contiene Dati OHLCV e Rendimenti del mercato.
+    Il report Excel generato offre una visualizzazione **Side-by-Side**:
+    * **Lato Sinistro:** Dati OHLCV e Rendimenti del Titolo selezionato.
+    * **Lato Destro:** Dati allineati del Benchmark (**FTSE MIB**).
     
     ### 2. Calcolo dei Parametri di Rischio
-    Il coefficiente **Beta ($\beta$)** è calcolato esplicitamente attraverso il rapporto tra Covarianza e Varianza:
+    Il coefficiente **Beta ($\beta$)** è calcolato replicando la metodologia accademica classica (Covarianza/Varianza):
     
     $$ \beta = \frac{Cov(R_{asset}, R_{market})}{Var(R_{market})} $$
     
-    * **$R_{asset}$:** Variazione percentuale settimanale del titolo.
-    * **$R_{market}$:** Variazione percentuale settimanale del FTSE MIB.
-    
-    ### 3. Significato del CAPM Return
-    Il valore indicato come "CAPM Return" (o Rendimento Atteso) indica il rendimento teorico annuo specifico per quel titolo, calcolato come:
+    ### 3. Costo del Capitale (CAPM)
+    Il rendimento atteso ("CAPM Return") è calcolato come:
     
     $$ E(R) = R_f + \beta \times (R_m - R_f) $$
-    
-    Esso risponde alla domanda: *"Quanto dovrebbe rendere questo titolo per compensare il rischio specifico (Beta) che sto assumendo rispetto a un BTP?"*.
     
     * **Risk-Free Rate ($R_f$):** BTP Italia 10 Anni (Default: ~3.8%). 
     * **Market Risk Premium ($MRP$):** 5.5% (Survey IESE Pablo Fernandez, 2025).
