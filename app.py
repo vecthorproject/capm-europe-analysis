@@ -4,6 +4,7 @@ import numpy as np
 import yfinance as yf
 import plotly.express as px
 import io 
+import requests # Necessario per aggirare il blocco 403
 
 # =========================
 # CONFIGURAZIONE PAGINA
@@ -17,50 +18,63 @@ I titoli italiani vengono recuperati **dinamicamente** da Wikipedia, ma puoi agg
 """)
 
 # =========================
-# FUNZIONE RECUPERO DINAMICO LISTA (NO LISTA INTERNA)
+# FUNZIONE RECUPERO DINAMICO (ANTI-BLOCCO 403)
 # =========================
 @st.cache_data
 def get_ftse_mib_tickers_dynamic():
     """
-    Va su Wikipedia, legge la tabella del FTSE MIB e restituisce la lista pulita.
-    Nessuna lista hardcoded nel codice!
+    Tenta di scaricare da Wikipedia fingendosi un browser.
+    Se fallisce, usa una lista statica di backup.
     """
+    # Lista di riserva (Fallback) "Indistruttibile"
+    STATIC_BACKUP = {
+        "A2A.MI": "A2A", "AMP.MI": "Amplifon", "AZM.MI": "Azimut", "BGN.MI": "Banca Generali",
+        "BMED.MI": "Banca Mediolanum", "BAMI.MI": "Banco BPM", "BPE.MI": "BPER Banca",
+        "CPR.MI": "Campari", "DIA.MI": "Diasorin", "ENEL.MI": "Enel", "ENI.MI": "Eni",
+        "ERG.MI": "ERG", "RACE.MI": "Ferrari", "FBK.MI": "FinecoBank", "G.MI": "Generali",
+        "HER.MI": "Hera", "IP.MI": "Interpump", "ISP.MI": "Intesa Sanpaolo", "INW.MI": "Inwit",
+        "IG.MI": "Italgas", "IVG.MI": "Iveco", "LDO.MI": "Leonardo", "MB.MI": "Mediobanca",
+        "MONC.MI": "Moncler", "NEXI.MI": "Nexi", "PIRC.MI": "Pirelli", "PST.MI": "Poste Italiane",
+        "PRY.MI": "Prysmian", "REC.MI": "Recordati", "SPM.MI": "Saipem", "SRG.MI": "Snam",
+        "STLAM.MI": "Stellantis", "STMMI.MI": "STMicroelectronics", "TEN.MI": "Tenaris",
+        "TRN.MI": "Terna", "TIT.MI": "Telecom Italia", "UCG.MI": "UniCredit", "UNI.MI": "Unipol"
+    }
+
     try:
-        # URL della pagina Wikipedia del FTSE MIB
         url = "https://en.wikipedia.org/wiki/FTSE_MIB"
         
-        # Pandas legge tutte le tabelle nella pagina
-        tables = pd.read_html(url)
+        # IL TRUCCO: Ci fingiamo un browser Chrome per evitare l'errore 403
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
         
-        # Solitamente la tabella dei costituenti è la seconda (indice 1)
-        # Cerchiamo quella che ha la colonna "Ticker" o "Company"
+        # Scarichiamo l'HTML con requests
+        response = requests.get(url, headers=headers)
+        response.raise_for_status() # Controlla se ci sono errori
+        
+        # Passiamo l'HTML a Pandas
+        tables = pd.read_html(io.StringIO(response.text))
         df_list = tables[1] 
         
-        # Pulizia: Wikipedia a volte mette "Ticker" o "Symbol". Adattiamo.
-        # Creiamo un dizionario {Ticker: Nome Azienda}
         tickers_dict = {}
-        
-        # Iteriamo sulle righe della tabella scaricata
         for index, row in df_list.iterrows():
-            # Cerchiamo di prendere il ticker e il nome
-            # Nota: La struttura di Wikipedia potrebbe cambiare, usiamo indici posizionali o nomi comuni
-            ticker = row.iloc[1] # Solitamente la seconda colonna è il Ticker
-            name = row.iloc[0]   # Solitamente la prima è il nome
+            try:
+                # Adattiamo in base alla struttura attuale di Wiki
+                ticker = row.iloc[1] 
+                name = row.iloc[0]
+                if "MI" not in ticker: ticker = f"{ticker}.MI"
+                tickers_dict[ticker] = name
+            except:
+                continue
             
-            # Pulizia Ticker: Wikipedia spesso non mette .MI
-            if "MI" not in ticker:
-                ticker = f"{ticker}.MI"
-            
-            tickers_dict[ticker] = name
-            
+        if not tickers_dict: return STATIC_BACKUP # Se la tabella è vuota, usa backup
         return tickers_dict
 
     except Exception as e:
-        # Se Wikipedia cambia struttura o non c'è internet, fallback
-        st.warning(f"Impossibile scaricare la lista da Wikipedia ({e}). Usa l'inserimento manuale.")
-        return {}
+        # Se fallisce (no internet, wikipedia giù, ecc), usa il backup silenziosamente
+        return STATIC_BACKUP
 
-# Carichiamo la lista all'avvio
+# Carichiamo la lista (O da Wikipedia, o dal Backup)
 DYNAMIC_TICKER_MAP = get_ftse_mib_tickers_dynamic()
 
 # =========================
@@ -81,32 +95,30 @@ BENCHMARK_OPTIONS = {
 # =========================
 st.sidebar.header("⚙️ Configurazione Analisi")
 
-# 1. Selezione Titoli (Dinamica + Manuale)
 st.sidebar.subheader("1. Selezione Asset")
 
-# A. Menu a tendina (Popolato da Wikipedia)
+# A. Menu a tendina (Popolato da Wikipedia o Backup)
 def format_func_ticker(option):
     return f"{DYNAMIC_TICKER_MAP.get(option, option)} ({option})"
 
 selected_from_list = []
 if DYNAMIC_TICKER_MAP:
     selected_from_list = st.sidebar.multiselect(
-        "A. Scegli dal FTSE MIB (Da Wikipedia):",
+        "A. Scegli dal FTSE MIB:",
         options=list(DYNAMIC_TICKER_MAP.keys()),
         default=["ENEL.MI", "ISP.MI"] if "ENEL.MI" in DYNAMIC_TICKER_MAP else [],
         format_func=format_func_ticker
     )
 
-# B. Input Manuale (Libertà Totale)
+# B. Input Manuale
 st.sidebar.markdown("**Oppure aggiungi ticker extra:**")
 manual_tickers_str = st.sidebar.text_input(
     "B. Inserimento Manuale (es. RACE.MI, AAPL, TSLA)",
-    help="Inserisci ticker separati da virgola. Esempio: 'JUVE.MI' o 'NVDA'"
+    help="Inserisci ticker separati da virgola."
 )
 
-# Uniamo le due liste
 manual_tickers_list = [t.strip() for t in manual_tickers_str.split(',') if t.strip() != ""]
-final_tickers_list = list(set(selected_from_list + manual_tickers_list)) # Rimuove duplicati
+final_tickers_list = list(set(selected_from_list + manual_tickers_list)) 
 
 st.sidebar.markdown("---")
 
@@ -186,7 +198,7 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
         
         summary_data = []
         for ticker, data in analysis_results.items():
-            full_name = DYNAMIC_TICKER_MAP.get(ticker, ticker) # Nome da Wikipedia se c'è
+            full_name = DYNAMIC_TICKER_MAP.get(ticker, ticker)
             summary_data.append({
                 "Ragione Sociale": full_name, "Ticker": ticker,
                 "Beta": f"{data['stats']['Beta']:.3f}",
