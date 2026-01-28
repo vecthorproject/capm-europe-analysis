@@ -18,7 +18,18 @@ I dati sono sincronizzati sui calendari di borsa europei per la massima precisio
 """)
 
 # =========================
-# 1. MOTORE DI RICERCA YAHOO (Global ma consigliato EU)
+# GESTIONE STATO (SESSION STATE)
+# =========================
+# 1. Inizializziamo la lista ticker VUOTA come richiesto
+if 'selected_tickers_list' not in st.session_state:
+    st.session_state['selected_tickers_list'] = [] 
+
+# 2. Dizionario per salvare i nomi completi (Ragione Sociale) puliti
+if 'ticker_names_map' not in st.session_state:
+    st.session_state['ticker_names_map'] = {}
+
+# =========================
+# 1. MOTORE DI RICERCA YAHOO (FILTRATO PER EUROPA)
 # =========================
 def search_yahoo_finance(query):
     if not query or len(query) < 2: return []
@@ -28,27 +39,36 @@ def search_yahoo_finance(query):
         r = requests.get(url, headers=headers, timeout=5)
         data = r.json()
         results = []
+        
+        # Codici Borsa Yahoo per l'Europa (Milan, Paris, Xetra, Madrid, Amsterdam, London, ecc.)
+        # Filtriamo per mostrare solo risultati che "funzionano" col benchmark europeo
+        europe_exchanges = ['MIL', 'PAR', 'GER', 'LSE', 'AMS', 'MCE', 'LIS', 'WSE', 'VIE']
+        
         if 'quotes' in data:
             for item in data['quotes']:
                 symbol = item.get('symbol')
                 name = item.get('shortname') or item.get('longname')
-                exchange = item.get('exchange')
-                # Filtriamo visivamente per aiutare l'utente
-                if symbol and name:
+                exchange = item.get('exchange') # Es. 'MIL', 'NYQ'
+                
+                # FILTRO RIGIDO: Mostriamo solo se è una borsa Europea compatibile
+                if symbol and name and exchange in europe_exchanges:
+                    
+                    # Formattiamo l'etichetta per il menu
                     label = f"{name} ({symbol}) - {exchange}"
-                    results.append((label, symbol))
+                    
+                    # Salviamo: (Label Menu, Ticker Reale, Nome Pulito)
+                    results.append((label, symbol, name))
+                    
         return results
     except: return []
 
 # =========================
-# 2. RECUPERO NOMI (WIKIPEDIA)
+# 2. RECUPERO NOMI (WIKIPEDIA - SOLO PER SUGGERIMENTI)
 # =========================
 @st.cache_data
 def get_ftse_mib_tickers_dynamic():
-    STATIC_BACKUP = {
-        "A2A.MI": "A2A", "ENEL.MI": "Enel", "ENI.MI": "Eni", "ISP.MI": "Intesa Sanpaolo",
-        "RACE.MI": "Ferrari", "STLAM.MI": "Stellantis", "UCG.MI": "UniCredit", "TIT.MI": "TIM"
-    }
+    # Lista vuota di backup se fallisce (per non sporcare la UI)
+    STATIC_BACKUP = {}
     try:
         url = "https://en.wikipedia.org/wiki/FTSE_MIB"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -63,16 +83,19 @@ def get_ftse_mib_tickers_dynamic():
                 if "MI" not in ticker: ticker = f"{ticker}.MI"
                 tickers_dict[ticker] = name
             except: continue
-        if not tickers_dict: return STATIC_BACKUP
         return tickers_dict
     except: return STATIC_BACKUP
 
-DYNAMIC_TICKER_MAP = get_ftse_mib_tickers_dynamic()
+# Carichiamo la mappa nomi da Wiki per popolare eventuali buchi
+WIKI_NAMES = get_ftse_mib_tickers_dynamic()
+# Aggiorniamo la mappa globale dei nomi con quelli di Wiki
+st.session_state['ticker_names_map'].update(WIKI_NAMES)
 
 # =========================
 # DATABASE INDICI (SOLO EUROPA)
 # =========================
 BENCHMARK_OPTIONS = {
+    "": "", # Opzione vuota iniziale
     "🇮🇹 FTSE MIB (Italia - Large Cap)": "FTSEMIB.MI",
     "🇮🇹 FTSE Italia All-Share (Italia - Completo)": "^FTITLMS",
     "🇪🇺 Euro Stoxx 50 (Europa - Blue Chips)": "^STOXX50E",
@@ -85,64 +108,73 @@ BENCHMARK_OPTIONS = {
 # =========================
 st.sidebar.header("⚙️ Configurazione")
 
-if 'selected_tickers_list' not in st.session_state:
-    st.session_state['selected_tickers_list'] = ["ENEL.MI", "ISP.MI"]
-
 st.sidebar.subheader("1. Ricerca Titoli (Europa)")
-st.sidebar.caption("Cerca aziende italiane (es. *Ferrari*) o europee (es. *LVMH*, *Volkswagen*).")
+st.sidebar.caption("Il sistema filtra automaticamente per mostrare solo titoli compatibili (Borse Europee).")
 
-# Ricerca
-search_query = st.sidebar.text_input("🔍 Cerca azienda:", "")
+# --- RICERCA ---
+search_query = st.sidebar.text_input("🔍 Cerca azienda (es. Ferrari, Enel):", "")
 if search_query:
     search_results = search_yahoo_finance(search_query)
     if search_results:
-        selected_result = st.sidebar.selectbox("Risultati:", options=search_results, format_func=lambda x: x[0])
+        # L'utente sceglie dalla lista filtrata
+        # x[0] è la label, x[1] il ticker, x[2] il nome pulito
+        selected_tuple = st.sidebar.selectbox("Risultati Europei:", options=search_results, format_func=lambda x: x[0])
+        
         if st.sidebar.button("➕ Aggiungi"):
-            ticker_to_add = selected_result[1]
+            ticker_to_add = selected_tuple[1]
+            clean_name = selected_tuple[2]
+            
+            # 1. Aggiungiamo alla lista se non c'è
             if ticker_to_add not in st.session_state['selected_tickers_list']:
                 st.session_state['selected_tickers_list'].append(ticker_to_add)
-                st.rerun()
+                
+            # 2. Salviamo il nome pulito per l'Excel
+            st.session_state['ticker_names_map'][ticker_to_add] = clean_name
+            
+            st.rerun()
     else:
-        st.sidebar.warning("Nessun risultato.")
+        st.sidebar.warning("Nessun titolo europeo trovato con questo nome.")
 
-# Lista Attiva
+# --- LISTA ATTIVA ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("📋 Portafoglio Analisi")
 final_selection = st.sidebar.multiselect(
-    "Titoli attivi:",
+    "Titoli selezionati:",
     options=st.session_state['selected_tickers_list'],
     default=st.session_state['selected_tickers_list']
 )
 
+# Gestione rimozione dalla lista
 if set(final_selection) != set(st.session_state['selected_tickers_list']):
     st.session_state['selected_tickers_list'] = final_selection
     st.rerun()
 
 st.sidebar.markdown("---")
 
-# Parametri
+# --- PARAMETRI ---
 st.sidebar.subheader("2. Parametri Macro")
-selected_bench_name = st.sidebar.selectbox("Benchmark di Riferimento:", list(BENCHMARK_OPTIONS.keys()))
-benchmark_ticker = BENCHMARK_OPTIONS[selected_bench_name]
+selected_bench_name = st.sidebar.selectbox("Benchmark di Riferimento:", list(BENCHMARK_OPTIONS.keys()), index=0) # Index 0 è vuoto
 
-# Nota: Il BTP è perfetto per l'Europa, il Bund sarebbe l'alternativa ma per l'Italia usiamo il BTP.
+# Gestione caso selezione vuota
+benchmark_ticker = None
+if selected_bench_name:
+    benchmark_ticker = BENCHMARK_OPTIONS[selected_bench_name]
+
 rf_input = st.sidebar.number_input("Risk Free (BTP 10Y)", value=3.8, step=0.1) / 100
 mrp_input = st.sidebar.number_input("Market Risk Premium (Europa)", value=5.5, step=0.1) / 100
 years_input = st.sidebar.slider("Anni (Dati Settimanali)", 1, 5, 2) 
 
 # =========================
-# MOTORE DI CALCOLO (ROBUSTO)
+# MOTORE DI CALCOLO
 # =========================
 
 @st.cache_data
 def get_data_pair(ticker, benchmark, years):
     try:
-        # Scarica i dati
         data = yf.download([ticker, benchmark], period=f"{years}y", interval="1wk", auto_adjust=False, progress=False)
-        
         if data.empty: return None, None
 
-        # Gestione colonne MultiIndex
+        # Gestione colonne MultiIndex o Single
         try:
             if isinstance(data.columns, pd.MultiIndex):
                 closes = data["Close"]
@@ -152,12 +184,12 @@ def get_data_pair(ticker, benchmark, years):
             if ticker not in closes.columns or benchmark not in closes.columns:
                 return None, None
             
-            # Estrazione sicura
+            # Helper estrazione
             def safe_extract(col_name):
                 if col_name in data and isinstance(data[col_name].columns, pd.Index):
                     if ticker in data[col_name].columns and benchmark in data[col_name].columns:
                         return data[col_name][[ticker, benchmark]].dropna()
-                return closes # Fallback
+                return closes 
 
             opens = safe_extract("Open")
             highs = safe_extract("High")
@@ -187,7 +219,6 @@ def get_data_pair(ticker, benchmark, years):
         }).set_index("Data")
         
         return df_asset, df_bench
-
     except Exception: return None, None
 
 def calculate_metrics_and_structure(df_asset, df_bench, rf, mrp):
@@ -203,7 +234,7 @@ def calculate_metrics_and_structure(df_asset, df_bench, rf, mrp):
     df_asset = df_asset.loc[common_idx].sort_index(ascending=False)
     df_bench = df_bench.loc[common_idx].sort_index(ascending=False)
 
-    if len(df_asset) < 10: return None, None, None # Troppi pochi dati
+    if len(df_asset) < 10: return None, None, None 
 
     y, x = df_asset["Var %"], df_bench["Var %"]
     covariance = np.cov(y, x)[0][1]
@@ -224,9 +255,12 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
         
         summary_data = []
         for ticker, data in analysis_results.items():
-            full_name = DYNAMIC_TICKER_MAP.get(ticker, ticker)
+            # Recuperiamo SOLO IL NOME pulito dalla mappa
+            full_name = st.session_state['ticker_names_map'].get(ticker, ticker)
+            
             summary_data.append({
-                "Ragione Sociale": full_name, "Ticker": ticker,
+                "Ragione Sociale": full_name, # Solo nome, niente ticker qui
+                "Ticker": ticker,
                 "Beta": f"{data['stats']['Beta']:.3f}",
                 "Covarianza": f"{data['stats']['Covarianza']:.6f}",
                 "Varianza Mkt": f"{data['stats']['Varianza']:.6f}",
@@ -236,7 +270,7 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
         
         for ticker, data in analysis_results.items():
             sheet_name = ticker.replace(".MI", "").replace("^", "")[:30] 
-            full_name = DYNAMIC_TICKER_MAP.get(ticker, ticker)
+            full_name = st.session_state['ticker_names_map'].get(ticker, ticker)
             
             metrics_df = pd.DataFrame({
                 "METRICA": ["SOCIETÀ", "BETA", "COVARIANZA", "VARIANZA", "RISK FREE", "MRP", "CAPM RETURN"],
@@ -251,16 +285,32 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
                 if col in df_bench_view.columns: df_bench_view[col] = df_bench_view[col].apply(fmt_pct)
 
             ws = writer.sheets[sheet_name]
+            # Intestazione colonna con Nome e Ticker per chiarezza
             ws.cell(row=9, column=1, value=f"{full_name} ({ticker})") 
             df_asset_view.to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=0)
             offset = len(df_asset_view.columns) + 1 + 2 
             ws.cell(row=9, column=offset + 1, value=f"{bench_name} (Benchmark)")
             df_bench_view.to_excel(writer, sheet_name=sheet_name, startrow=9, startcol=offset)
             
+        # ==========================================
+        # AUTO-ADJUST COLUMNS (FIX ####)
+        # ==========================================
         for sheet in writer.sheets:
             ws = writer.sheets[sheet]
             for col in ws.columns:
-                ws.column_dimensions[col[0].column_letter].width = 15
+                max_len = 0
+                for cell in col:
+                    try: 
+                        val_str = str(cell.value)
+                        if len(val_str) > max_len: max_len = len(val_str)
+                    except: pass
+                
+                # Moltiplicatore aggressivo (1.3) + base larga (5) per evitare ####
+                adjusted_width = (max_len * 1.3) + 5
+                # Minimo assoluto 18
+                if adjusted_width < 18: adjusted_width = 18
+                
+                ws.column_dimensions[col[0].column_letter].width = adjusted_width
             
     return output.getvalue()
 
@@ -270,7 +320,9 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
 if st.button("🚀 Avvia Analisi", type="primary"):
     
     if not final_selection:
-        st.error("⚠️ La lista titoli è vuota.")
+        st.error("⚠️ La lista titoli è vuota. Cerca e aggiungi titoli nella sidebar.")
+    elif not benchmark_ticker:
+        st.error("⚠️ Seleziona un Benchmark di riferimento.")
     else:
         with st.spinner(f'Analisi in corso...'):
             results = {}
@@ -287,7 +339,7 @@ if st.button("🚀 Avvia Analisi", type="primary"):
                 st.session_state['done'] = True
                 st.toast(f'✅ Completato!', icon="🚀")
             else:
-                st.error(f"Nessun dato trovato. Assicurati di confrontare titoli Europei con indici Europei per la sincronizzazione delle date.")
+                st.error("Nessun dato trovato. Assicurati che il titolo sia quotato da abbastanza tempo.")
 
 # =========================
 # VISUALIZZAZIONE
@@ -298,7 +350,7 @@ if st.session_state.get('done'):
     
     summary_list = []
     for t, data in results.items():
-        full_name = DYNAMIC_TICKER_MAP.get(t, t)
+        full_name = st.session_state['ticker_names_map'].get(t, t)
         summary_list.append({
             "Società": full_name, "Ticker": t, "Beta": data['stats']['Beta'],
             "CAPM Return": f"{data['stats']['Exp Return']*100:.2f}%"
