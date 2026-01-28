@@ -4,77 +4,85 @@ import numpy as np
 import yfinance as yf
 import plotly.express as px
 import io 
-import requests # Necessario per aggirare il blocco 403
+import requests 
 
 # =========================
 # CONFIGURAZIONE PAGINA
 # =========================
-st.set_page_config(page_title="Analisi Finanziaria Beta & CAPM", layout="wide")
+st.set_page_config(page_title="Analisi Finanziaria Pro", layout="wide")
 
 st.title("📊 Analisi Finanziaria: Beta, CAPM e Dati Storici")
 st.markdown("""
-Strumento professionale per il calcolo del **Costo del Capitale** e del **Rischio Sistematico (Beta)**.
-I titoli italiani vengono recuperati **dinamicamente** da Wikipedia, ma puoi aggiungere qualsiasi ticker globale manualmente.
+Strumento professionale per il calcolo del **Costo del Capitale** e del **Rischio Sistematico**.
+Ricerca titoli intelligente (Global Search) e confronto Side-by-Side.
 """)
 
 # =========================
-# FUNZIONE RECUPERO DINAMICO (ANTI-BLOCCO 403)
+# 1. MOTORE DI RICERCA YAHOO (NUOVO)
 # =========================
-@st.cache_data
-def get_ftse_mib_tickers_dynamic():
+def search_yahoo_finance(query):
     """
-    Tenta di scaricare da Wikipedia fingendosi un browser.
-    Se fallisce, usa una lista statica di backup.
+    Cerca il ticker su Yahoo Finance partendo dal nome dell'azienda.
+    Restituisce una lista di opzioni trovate.
     """
-    # Lista di riserva (Fallback) "Indistruttibile"
-    STATIC_BACKUP = {
-        "A2A.MI": "A2A", "AMP.MI": "Amplifon", "AZM.MI": "Azimut", "BGN.MI": "Banca Generali",
-        "BMED.MI": "Banca Mediolanum", "BAMI.MI": "Banco BPM", "BPE.MI": "BPER Banca",
-        "CPR.MI": "Campari", "DIA.MI": "Diasorin", "ENEL.MI": "Enel", "ENI.MI": "Eni",
-        "ERG.MI": "ERG", "RACE.MI": "Ferrari", "FBK.MI": "FinecoBank", "G.MI": "Generali",
-        "HER.MI": "Hera", "IP.MI": "Interpump", "ISP.MI": "Intesa Sanpaolo", "INW.MI": "Inwit",
-        "IG.MI": "Italgas", "IVG.MI": "Iveco", "LDO.MI": "Leonardo", "MB.MI": "Mediobanca",
-        "MONC.MI": "Moncler", "NEXI.MI": "Nexi", "PIRC.MI": "Pirelli", "PST.MI": "Poste Italiane",
-        "PRY.MI": "Prysmian", "REC.MI": "Recordati", "SPM.MI": "Saipem", "SRG.MI": "Snam",
-        "STLAM.MI": "Stellantis", "STMMI.MI": "STMicroelectronics", "TEN.MI": "Tenaris",
-        "TRN.MI": "Terna", "TIT.MI": "Telecom Italia", "UCG.MI": "UniCredit", "UNI.MI": "Unipol"
-    }
-
+    if not query or len(query) < 2: return []
+    
     try:
-        url = "https://en.wikipedia.org/wiki/FTSE_MIB"
-        
-        # IL TRUCCO: Ci fingiamo un browser Chrome per evitare l'errore 403
+        # API "nascosta" di Yahoo Finance per l'autocomplete
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
         
-        # Scarichiamo l'HTML con requests
-        response = requests.get(url, headers=headers)
-        response.raise_for_status() # Controlla se ci sono errori
+        r = requests.get(url, headers=headers, timeout=5)
+        data = r.json()
         
-        # Passiamo l'HTML a Pandas
+        results = []
+        if 'quotes' in data:
+            for item in data['quotes']:
+                # Filtriamo solo le azioni (Equity) per evitare ETF o futures strani se non richiesti
+                # Ma lasciamo aperto per flessibilità.
+                symbol = item.get('symbol')
+                name = item.get('shortname') or item.get('longname')
+                exchange = item.get('exchange')
+                
+                if symbol and name:
+                    # Formattiamo per la visualizzazione: "Ferrari N.V. (RACE.MI) - Milan"
+                    label = f"{name} ({symbol}) - {exchange}"
+                    results.append((label, symbol))
+                    
+        return results # Restituisce lista di tuple (Etichetta Visibile, Ticker Reale)
+        
+    except Exception as e:
+        return []
+
+# =========================
+# 2. RECUPERO DINAMICO FTSE MIB (WIKIPEDIA)
+# =========================
+@st.cache_data
+def get_ftse_mib_tickers_dynamic():
+    STATIC_BACKUP = {
+        "A2A.MI": "A2A", "ENEL.MI": "Enel", "ENI.MI": "Eni", "ISP.MI": "Intesa Sanpaolo",
+        "RACE.MI": "Ferrari", "STLAM.MI": "Stellantis", "UCG.MI": "UniCredit", "TIT.MI": "TIM"
+    }
+    try:
+        url = "https://en.wikipedia.org/wiki/FTSE_MIB"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers)
         tables = pd.read_html(io.StringIO(response.text))
         df_list = tables[1] 
-        
         tickers_dict = {}
         for index, row in df_list.iterrows():
             try:
-                # Adattiamo in base alla struttura attuale di Wiki
                 ticker = row.iloc[1] 
                 name = row.iloc[0]
                 if "MI" not in ticker: ticker = f"{ticker}.MI"
                 tickers_dict[ticker] = name
-            except:
-                continue
-            
-        if not tickers_dict: return STATIC_BACKUP # Se la tabella è vuota, usa backup
+            except: continue
+        if not tickers_dict: return STATIC_BACKUP
         return tickers_dict
+    except: return STATIC_BACKUP
 
-    except Exception as e:
-        # Se fallisce (no internet, wikipedia giù, ecc), usa il backup silenziosamente
-        return STATIC_BACKUP
-
-# Carichiamo la lista (O da Wikipedia, o dal Backup)
 DYNAMIC_TICKER_MAP = get_ftse_mib_tickers_dynamic()
 
 # =========================
@@ -84,62 +92,73 @@ BENCHMARK_OPTIONS = {
     "FTSE MIB (Italia 40)": "FTSEMIB.MI",
     "FTSE Italia All-Share": "^FTITLMS",
     "DAX (Germania)": "^GDAXI",
-    "CAC 40 (Francia)": "^FCHI",
     "S&P 500 (USA)": "^GSPC",
-    "Euro Stoxx 50 (Europa)": "^STOXX50E",
-    "Nasdaq 100 (Tech USA)": "^NDX"
+    "Nasdaq 100": "^NDX",
+    "Euro Stoxx 50": "^STOXX50E"
 }
 
 # =========================
-# SIDEBAR - INPUT
+# SIDEBAR - INPUT INTELLIGENTE
 # =========================
-st.sidebar.header("⚙️ Configurazione Analisi")
+st.sidebar.header("⚙️ Configurazione")
 
-st.sidebar.subheader("1. Selezione Asset")
+# --- GESTIONE LISTA TITOLI ---
+if 'selected_tickers_list' not in st.session_state:
+    st.session_state['selected_tickers_list'] = ["ENEL.MI", "ISP.MI"] # Default iniziale
 
-# A. Menu a tendina (Popolato da Wikipedia o Backup)
-def format_func_ticker(option):
-    return f"{DYNAMIC_TICKER_MAP.get(option, option)} ({option})"
+st.sidebar.subheader("1. Ricerca e Aggiungi Titoli")
 
-selected_from_list = []
-if DYNAMIC_TICKER_MAP:
-    selected_from_list = st.sidebar.multiselect(
-        "A. Scegli dal FTSE MIB:",
-        options=list(DYNAMIC_TICKER_MAP.keys()),
-        default=["ENEL.MI", "ISP.MI"] if "ENEL.MI" in DYNAMIC_TICKER_MAP else [],
-        format_func=format_func_ticker
+# A. BARRA DI RICERCA INTELLIGENTE
+search_query = st.sidebar.text_input("🔍 Cerca azienda (es. Ferrari, Apple)", "")
+search_results = []
+
+if search_query:
+    search_results = search_yahoo_finance(search_query)
+
+if search_results:
+    # Mostra i risultati in una selectbox
+    selected_result = st.sidebar.selectbox(
+        "Risultati trovati:", 
+        options=search_results, 
+        format_func=lambda x: x[0] # Mostra l'etichetta bella
     )
+    
+    # Bottone per aggiungere
+    if st.sidebar.button("➕ Aggiungi alla lista"):
+        ticker_to_add = selected_result[1] # Prende il ticker reale (es. RACE.MI)
+        if ticker_to_add not in st.session_state['selected_tickers_list']:
+            st.session_state['selected_tickers_list'].append(ticker_to_add)
+            st.success(f"Aggiunto: {ticker_to_add}")
+            st.rerun() # Ricarica la pagina per aggiornare la lista sotto
 
-# B. Input Manuale
-st.sidebar.markdown("**Oppure aggiungi ticker extra:**")
-manual_tickers_str = st.sidebar.text_input(
-    "B. Inserimento Manuale (es. RACE.MI, AAPL, TSLA)",
-    help="Inserisci ticker separati da virgola."
+# B. VISUALIZZA E GESTISCI LA LISTA ATTUALE
+st.sidebar.markdown("---")
+st.sidebar.subheader("📋 Il tuo Portafoglio Analisi")
+
+# Multiselect che funge da "Cestino" (puoi rimuovere i titoli cliccando la X)
+final_selection = st.sidebar.multiselect(
+    "Titoli attivi:",
+    options=st.session_state['selected_tickers_list'],
+    default=st.session_state['selected_tickers_list']
 )
 
-manual_tickers_list = [t.strip() for t in manual_tickers_str.split(',') if t.strip() != ""]
-final_tickers_list = list(set(selected_from_list + manual_tickers_list)) 
+# Aggiorniamo lo stato se l'utente rimuove qualcosa dalla multiselect
+if set(final_selection) != set(st.session_state['selected_tickers_list']):
+    st.session_state['selected_tickers_list'] = final_selection
+    st.rerun()
 
 st.sidebar.markdown("---")
 
-# 2. Selezione Benchmark
-st.sidebar.subheader("2. Selezione Benchmark")
-selected_bench_name = st.sidebar.selectbox(
-    "Confronta con Indice:",
-    options=list(BENCHMARK_OPTIONS.keys()),
-    index=0 
-)
+# 2. Benchmark e Parametri
+st.sidebar.subheader("2. Parametri")
+selected_bench_name = st.sidebar.selectbox("Benchmark:", list(BENCHMARK_OPTIONS.keys()))
 benchmark_ticker = BENCHMARK_OPTIONS[selected_bench_name]
 
-st.sidebar.markdown("---")
-
-# 3. Parametri CAPM
-st.sidebar.subheader("3. Parametri Macro")
-rf_input = st.sidebar.number_input("Risk Free Rate (BTP 10Y)", value=3.8, step=0.1) / 100
+rf_input = st.sidebar.number_input("Risk Free (BTP 10Y)", value=3.8, step=0.1) / 100
 mrp_input = st.sidebar.number_input("Market Risk Premium", value=5.5, step=0.1) / 100
-years_input = st.sidebar.slider("Orizzonte Temporale (Anni)", 1, 5, 2) 
+years_input = st.sidebar.slider("Anni", 1, 5, 2) 
 
-st.sidebar.info(f"Titoli selezionati: {len(final_tickers_list)}. Premi **Avvia Analisi**.")
+st.sidebar.info(f"Titoli pronti: {len(final_selection)}. Premi Avvia.")
 
 # =========================
 # MOTORE DI CALCOLO
@@ -151,11 +170,12 @@ def get_data_pair(ticker, benchmark, years):
         data = yf.download([ticker, benchmark], period=f"{years}y", interval="1wk", auto_adjust=False, progress=False)
         try:
             closes = data["Close"][[ticker, benchmark]].dropna()
-            opens = data["Open"][[ticker, benchmark]].dropna()
-            highs = data["High"][[ticker, benchmark]].dropna()
-            lows = data["Low"][[ticker, benchmark]].dropna()
-            vols = data["Volume"][[ticker, benchmark]].dropna()
-        except KeyError: return None, None
+            # Se scarica solo Close è un problema, servono anche gli altri per l'excel
+            opens = data["Open"][[ticker, benchmark]].dropna() if "Open" in data else closes
+            highs = data["High"][[ticker, benchmark]].dropna() if "High" in data else closes
+            lows = data["Low"][[ticker, benchmark]].dropna() if "Low" in data else closes
+            vols = data["Volume"][[ticker, benchmark]].dropna() if "Volume" in data else closes
+        except: return None, None
 
         common_index = closes.index
         df_asset = pd.DataFrame({
@@ -167,9 +187,9 @@ def get_data_pair(ticker, benchmark, years):
             "Massimo": highs[benchmark], "Minimo": lows[benchmark], "Volume": vols[benchmark]
         }).set_index("Data")
         return df_asset, df_bench
-    except Exception: return None, None
+    except: return None, None
 
-def calculate_metrics_and_structure(df_asset, df_bench, rf, mrp, years):
+def calculate_metrics_and_structure(df_asset, df_bench, rf, mrp):
     df_asset["Var %"] = df_asset["Ultimo"].pct_change()
     df_asset["Rendimento %"] = df_asset["Var %"]
     df_bench["Var %"] = df_bench["Ultimo"].pct_change()
@@ -185,7 +205,8 @@ def calculate_metrics_and_structure(df_asset, df_bench, rf, mrp, years):
     y, x = df_asset["Var %"], df_bench["Var %"]
     covariance = np.cov(y, x)[0][1]
     variance = np.var(x, ddof=1) 
-    beta = covariance / variance
+    if variance == 0: beta = 0 # Evita div by zero
+    else: beta = covariance / variance
     expected_return = rf + beta * mrp
     
     stats = {"Beta": beta, "Covarianza": covariance, "Varianza": variance, "Exp Return": expected_return}
@@ -194,10 +215,11 @@ def calculate_metrics_and_structure(df_asset, df_bench, rf, mrp, years):
 def generate_excel_report(analysis_results, rf, mrp, bench_name):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        def fmt_pct(val): return f"{val * 100:.3f}%" if (not pd.isna(val) and not isinstance(val, str)) else val
+        def fmt_pct(val): return f"{val * 100:.3f}%" if (not pd.isna(val) and isinstance(val, (int, float))) else val
         
         summary_data = []
         for ticker, data in analysis_results.items():
+            # Cerchiamo il nome pulito. Se non c'è in wiki, cerchiamo di indovinarlo o usiamo il ticker
             full_name = DYNAMIC_TICKER_MAP.get(ticker, ticker)
             summary_data.append({
                 "Ragione Sociale": full_name, "Ticker": ticker,
@@ -209,7 +231,7 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
         pd.DataFrame(summary_data).to_excel(writer, sheet_name="Sintesi", index=False)
         
         for ticker, data in analysis_results.items():
-            sheet_name = ticker.replace(".MI", "")[:30] 
+            sheet_name = ticker.replace(".MI", "").replace("^", "")[:30] 
             full_name = DYNAMIC_TICKER_MAP.get(ticker, ticker)
             
             metrics_df = pd.DataFrame({
@@ -234,38 +256,33 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
         for sheet in writer.sheets:
             ws = writer.sheets[sheet]
             for col in ws.columns:
-                max_len = 0
-                for cell in col:
-                    try: 
-                        if len(str(cell.value)) > max_len: max_len = len(str(cell.value))
-                    except: pass
-                ws.column_dimensions[col[0].column_letter].width = max(max_len + 2, 12)
+                ws.column_dimensions[col[0].column_letter].width = 15
             
     return output.getvalue()
 
 # =========================
-# LOGICA APP
+# LOGICA PRINCIPALE
 # =========================
 if st.button("🚀 Avvia Analisi", type="primary"):
     
-    if not final_tickers_list:
-        st.error("⚠️ Inserisci almeno un titolo (dalla lista o manualmente).")
+    if not final_selection:
+        st.error("⚠️ La lista titoli è vuota. Cerca e aggiungi titoli nella sidebar.")
     else:
         with st.spinner(f'Analisi in corso...'):
             results = {}
-            for t in final_tickers_list:
+            for t in final_selection:
                 df_asset, df_bench = get_data_pair(t, benchmark_ticker, years_input)
                 if df_asset is not None and not df_asset.empty:
-                    df_a, df_b, stats = calculate_metrics_and_structure(df_asset, df_bench, rf_input, mrp_input, years_input)
+                    df_a, df_b, stats = calculate_metrics_and_structure(df_asset, df_bench, rf_input, mrp_input)
                     results[t] = {"df_asset": df_a, "df_bench": df_b, "stats": stats}
             
             if results:
                 st.session_state['analysis_results'] = results
                 st.session_state['bench_used'] = selected_bench_name 
                 st.session_state['done'] = True
-                st.toast(f'✅ Completato per {len(results)} ticker!', icon="🚀")
+                st.toast(f'✅ Completato!', icon="🚀")
             else:
-                st.error("Nessun dato trovato. Controlla i ticker inseriti.")
+                st.error("Nessun dato trovato. Controlla i ticker.")
 
 # =========================
 # VISUALIZZAZIONE
@@ -287,16 +304,16 @@ if st.session_state.get('done'):
     
     col1, col2 = st.columns([2, 1])
     with col1:
-        st.subheader("Confronto Rischio (Beta)")
+        st.subheader("Confronto Rischio")
         beta_df = pd.DataFrame(summary_list)
         fig = px.bar(beta_df, x="Società", y="Beta", text_auto=".2f", title=f"Beta vs {bench_name} (1.0)")
         fig.add_hline(y=1, line_dash="dash", annotation_text="Mercato")
         st.plotly_chart(fig, use_container_width=True)
     with col2:
-        st.info(f"Benchmark utilizzato: **{bench_name}**.")
+        st.info(f"Analisi basata su **{years_input} anni** di dati settimanali.")
 
     excel_file = generate_excel_report(results, rf_input, mrp_input, bench_name)
-    st.download_button("📥 Scarica Report Excel", data=excel_file, file_name="Analisi_Finanziaria_Completa.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+    st.download_button("📥 Scarica Report Excel", data=excel_file, file_name="Analisi_Finanziaria_Pro.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
 
 # =========================
 # RELAZIONE METODOLOGICA (Espansa e Aggiornata)
