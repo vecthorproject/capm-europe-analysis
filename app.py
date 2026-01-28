@@ -68,7 +68,7 @@ def search_yahoo_finance(query):
     except: return []
 
 # =========================
-# LOGICA CALLBACK (Per aggiungere in modo sicuro)
+# LOGICA CALLBACK
 # =========================
 def add_ticker_to_portfolio():
     selection = st.session_state.get('temp_search_selection')
@@ -277,11 +277,11 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         def fmt_pct(val): return f"{val * 100:.3f}%" if (not pd.isna(val) and isinstance(val, (int, float))) else val
         
-        # --- STILE CELLE (Centrato) ---
+        # --- STILE ---
         center_align = Alignment(horizontal='center', vertical='center')
         header_font = Font(bold=True)
         
-        # SINTESI
+        # --- SINTESI ---
         summary_data = []
         for ticker, data in analysis_results.items():
             full_name = st.session_state['ticker_names_map'].get(ticker, ticker)
@@ -294,20 +294,19 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
         df_summary = pd.DataFrame(summary_data)
         df_summary.to_excel(writer, sheet_name="Sintesi", index=False)
         
-        # Applica stili alla sintesi
         ws_sum = writer.sheets["Sintesi"]
         for row in ws_sum.iter_rows():
             for cell in row:
                 cell.alignment = center_align
                 if cell.row == 1: cell.font = header_font
         
-        # FOGLI INDIVIDUALI
+        # --- FOGLI INDIVIDUALI ---
         for ticker, data in analysis_results.items():
             sheet_name = ticker.replace(".MI", "").replace("^", "")[:28] 
             full_name = st.session_state['ticker_names_map'].get(ticker, ticker)
             bench_clean = data['bench_used_name']
             
-            # HEADER (Tabellina in alto)
+            # HEADER METRICHE
             metrics_df = pd.DataFrame({
                 "METRICA": ["SOCIETÀ", "BETA", "COVARIANZA", "VARIANZA", "RISK FREE", "MRP", "CAPM RETURN"],
                 "VALORE": [full_name, f"{data['stats']['Beta']:.4f}", f"{data['stats']['Covarianza']:.6f}",
@@ -315,55 +314,68 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
             })
             metrics_df.to_excel(writer, sheet_name=sheet_name, startrow=0, startcol=0, index=False)
             
-            # DATI
+            # PREPARAZIONE DATI SPECULARI
+            # 1. Recupero dati e pulizia
             df_asset_view = data['df_asset'][["Ultimo", "Var %"]].copy()
             df_bench_view = data['df_bench'][["Ultimo", "Var %"]].copy()
-            df_asset_view.columns = [f"Prezzo", "Var %"]
-            df_bench_view.columns = [f"Prezzo", "Var %"]
             
-            if df_asset_view.index.tz is not None: df_asset_view.index = df_asset_view.index.tz_localize(None)
+            # 2. Reset dell'indice per far diventare la Data una colonna esplicita
+            df_asset_reset = df_asset_view.reset_index()
+            df_bench_reset = df_bench_view.reset_index()
             
-            # Formattazione Percentuali Dati
-            for col in df_asset_view.columns:
-                 if "Var" in col: df_asset_view[col] = df_asset_view[col].apply(fmt_pct)
-            for col in df_bench_view.columns:
-                 if "Var" in col: df_bench_view[col] = df_bench_view[col].apply(fmt_pct)
+            # 3. Rinomina colonne per l'header
+            # Struttura: Data | Prezzo | Var
+            df_asset_reset.columns = ["Data Rilevazione", "Prezzo", "Var %"]
+            df_bench_reset.columns = ["Data Rilevazione", "Prezzo", "Var %"]
             
-            # Colonna Separatore Vuota (Senza simbolo)
-            df_sep = pd.DataFrame(index=df_asset_view.index)
-            df_sep[" "] = "" 
+            # 4. Formattazione Dati
+            # Gestione Date (rimozione timezone)
+            if df_asset_reset["Data Rilevazione"].dt.tz is not None:
+                df_asset_reset["Data Rilevazione"] = df_asset_reset["Data Rilevazione"].dt.tz_localize(None)
+            if df_bench_reset["Data Rilevazione"].dt.tz is not None:
+                df_bench_reset["Data Rilevazione"] = df_bench_reset["Data Rilevazione"].dt.tz_localize(None)
+                
+            # Gestione Percentuali
+            df_asset_reset["Var %"] = df_asset_reset["Var %"].apply(fmt_pct)
+            df_bench_reset["Var %"] = df_bench_reset["Var %"].apply(fmt_pct)
             
-            df_final = pd.concat([df_asset_view, df_sep, df_bench_view], axis=1)
-            df_final.index.name = "Data Rilevazione"
+            # 5. Colonna Separatore Vuota
+            df_sep = pd.DataFrame([""] * len(df_asset_reset), columns=[" "])
+            
+            # 6. Unione Orizzontale (Data | Prezzo | Var | Vuoto | Data | Prezzo | Var)
+            df_final = pd.concat([df_asset_reset, df_sep, df_bench_reset], axis=1)
             
             start_row_data = 12
             ws = writer.sheets[sheet_name]
             
             # INTESTAZIONI DINAMICHE
+            # Titolo Asset (es. ENEL)
             ws.merge_cells(start_row=start_row_data-1, start_column=1, end_row=start_row_data-1, end_column=3)
-            ws.cell(row=start_row_data-1, column=1, value=full_name.upper()) # Dynamic Header
+            ws.cell(row=start_row_data-1, column=1, value=full_name.upper()) 
             
+            # Titolo Benchmark (es. FTSE MIB) - Nota: Colonna 5 (E) perché c'è il separatore in D
             ws.merge_cells(start_row=start_row_data-1, start_column=5, end_row=start_row_data-1, end_column=7)
-            ws.cell(row=start_row_data-1, column=5, value=bench_clean.upper()) # Dynamic Header
+            ws.cell(row=start_row_data-1, column=5, value=bench_clean.upper())
             
-            # Scrittura Tabella Dati
-            df_final.to_excel(writer, sheet_name=sheet_name, startrow=start_row_data, startcol=0)
+            # SCRITTURA TABELLA (Senza indice, perché le date sono ora colonne)
+            df_final.to_excel(writer, sheet_name=sheet_name, startrow=start_row_data, startcol=0, index=False)
             
-            # APPLICAZIONE FORMATTAZIONE CENTRATA A TUTTO IL FOGLIO
+            # FORMATTAZIONE VISIVA
             for row in ws.iter_rows():
                 for cell in row:
                     cell.alignment = center_align
-                    # Grassetto per intestazioni
+                    # Grassetto per intestazioni e titoli
                     if cell.row == 1 or cell.row == start_row_data or cell.row == start_row_data+1:
                         cell.font = header_font
 
-            # Larghezza Colonne
-            ws.column_dimensions['A'].width = 20 
-            ws.column_dimensions['B'].width = 15 
-            ws.column_dimensions['C'].width = 15 
-            ws.column_dimensions['D'].width = 5  
-            ws.column_dimensions['E'].width = 15 
-            ws.column_dimensions['F'].width = 15 
+            # LARGHEZZA COLONNE (Adattata alla nuova struttura)
+            ws.column_dimensions['A'].width = 18 # Data Asset
+            ws.column_dimensions['B'].width = 12 # Prezzo Asset
+            ws.column_dimensions['C'].width = 12 # Var Asset
+            ws.column_dimensions['D'].width = 3  # Separatore (Stretto)
+            ws.column_dimensions['E'].width = 18 # Data Bench
+            ws.column_dimensions['F'].width = 12 # Prezzo Bench
+            ws.column_dimensions['G'].width = 12 # Var Bench
             
     return output.getvalue()
 
@@ -436,7 +448,7 @@ if st.session_state.get('done'):
 st.markdown("---")
 with st.expander("ℹ️ Info Metodologiche"):
     st.markdown("I dati sono rettificati per dividendi e split. Il Beta è calcolato sulla covarianza dei rendimenti.")
-    
+
 # RELAZIONE METODOLOGICA (Espansa e Aggiornata)
 # =========================
 st.markdown("---")
