@@ -16,7 +16,7 @@ st.set_page_config(page_title="Analisi Beta Pro", layout="wide")
 st.title("🇪🇺 Analisi Finanziaria: Focus Europa & Italia")
 st.markdown("""
 Strumento professionale per il calcolo del **Beta**.
-**Nota Tecnica:** Per massima affidabilità, l'indice Italia utilizza il **FTSE MIB** come proxy ufficiale (High Reliability).
+**Nota Tecnica:** Report Excel esteso con layout OHLCV completo e doppia spaziatura.
 """)
 
 # =========================
@@ -234,48 +234,55 @@ def get_data_pair_manager(ticker, benchmark_code, start, end, interval):
     # 3. SYNC
     if df_asset.index.tz is not None: df_asset.index = df_asset.index.tz_localize(None)
     if df_bench.index.tz is not None: df_bench.index = df_bench.index.tz_localize(None)
-    df_asset = df_asset.sort_index()
-    df_bench = df_bench.sort_index()
     
-    merged = pd.merge_asof(
-        df_asset, df_bench, left_index=True, right_index=True, 
-        suffixes=('_ass', '_ben'), direction='nearest', tolerance=pd.Timedelta(days=4)
-    ).dropna()
+    # Troviamo l'intersezione delle date per filtrare
+    common_idx = df_asset.index.intersection(df_bench.index).sort_values()
     
-    if len(merged) < 5: return None, None, f"Errore Sincronizzazione: Dati insufficienti."
-        
-    df_asset_aligned = pd.DataFrame({"Ultimo": merged["Ultimo_ass"]})
-    df_bench_aligned = pd.DataFrame({"Ultimo": merged["Ultimo_ben"]})
+    if len(common_idx) < 5: return None, None, f"Errore Sincronizzazione: Dati insufficienti."
+    
+    # Filtriamo i dataframe completi (per mantenere OHLCV) usando l'indice comune
+    df_asset_aligned = df_asset.loc[common_idx]
+    df_bench_aligned = df_bench.loc[common_idx]
+    
     bench_clean_name = BENCHMARK_DICT.get(benchmark_code, benchmark_code)
     
     return df_asset_aligned, df_bench_aligned, bench_clean_name
 
 def calculate_metrics(df_asset, df_bench, rf, mrp, interval):
+    # Calcolo Var %
+    df_asset = df_asset.copy()
+    df_bench = df_bench.copy()
+    
     df_asset["Var %"] = df_asset["Ultimo"].pct_change()
     df_bench["Var %"] = df_bench["Ultimo"].pct_change()
-    df_asset = df_asset.dropna()
-    df_bench = df_bench.dropna()
     
-    common = df_asset.index.intersection(df_bench.index)
-    df_asset = df_asset.loc[common]
-    df_bench = df_bench.loc[common]
+    # Droppiamo NA per il calcolo matematico
+    df_calc_ass = df_asset.dropna()
+    df_calc_ben = df_bench.dropna()
+    
+    # Allineamento stretto per covarianza
+    common = df_calc_ass.index.intersection(df_calc_ben.index)
+    
+    if len(common) < 5: return None, None, None
 
-    min_obs = 5 if interval == "1mo" else 10
-    if len(df_asset) < min_obs: return None, None, None 
-
-    y, x = df_asset["Var %"], df_bench["Var %"]
+    y = df_calc_ass.loc[common]["Var %"]
+    x = df_calc_ben.loc[common]["Var %"]
+    
     covariance = np.cov(y, x)[0][1]
     variance = np.var(x, ddof=1) 
     beta = covariance / variance if variance != 0 else 0
     expected_return = rf + beta * mrp
     
     stats = {"Beta": beta, "Covarianza": covariance, "Varianza": variance, "Exp Return": expected_return}
+    
+    # Ritorniamo i dataframe originali (con Open/High/Low) ma con la colonna Var % aggiunta
     return df_asset, df_bench, stats
 
 def generate_excel_report(analysis_results, rf, mrp, bench_name):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        def fmt_pct(val): return f"{val * 100:.3f}%" if (not pd.isna(val) and isinstance(val, (int, float))) else val
+        def fmt_pct(val): return f"{val * 100:.2f}%" if (not pd.isna(val) and isinstance(val, (int, float))) else val
+        def fmt_num(val): return f"{val:.2f}" if (not pd.isna(val) and isinstance(val, (int, float))) else val
         
         # --- STILE ---
         center_align = Alignment(horizontal='center', vertical='center')
@@ -314,68 +321,94 @@ def generate_excel_report(analysis_results, rf, mrp, bench_name):
             })
             metrics_df.to_excel(writer, sheet_name=sheet_name, startrow=0, startcol=0, index=False)
             
-            # PREPARAZIONE DATI SPECULARI
-            # 1. Recupero dati e pulizia
-            df_asset_view = data['df_asset'][["Ultimo", "Var %"]].copy()
-            df_bench_view = data['df_bench'][["Ultimo", "Var %"]].copy()
+            # --- PREPARAZIONE DATI COMPLETI ---
             
-            # 2. Reset dell'indice per far diventare la Data una colonna esplicita
+            # Colonne da esportare (OHLCV + Var + Rendimento)
+            cols_export = ["Ultimo", "Apertura", "Massimo", "Minimo", "Volume", "Var %"]
+            
+            # Copia dati
+            df_asset_view = data['df_asset'][cols_export].copy()
+            df_bench_view = data['df_bench'][cols_export].copy()
+            
+            # Aggiunta colonna esplicita Rendimento % (uguale a Var %)
+            df_asset_view["RENDIMENTO %"] = df_asset_view["Var %"]
+            df_bench_view["RENDIMENTO %"] = df_bench_view["Var %"]
+            
+            # Reset Index per avere la Data come colonna
             df_asset_reset = df_asset_view.reset_index()
             df_bench_reset = df_bench_view.reset_index()
             
-            # 3. Rinomina colonne per l'header
-            # Struttura: Data | Prezzo | Var
-            df_asset_reset.columns = ["Data Rilevazione", "Prezzo", "Var %"]
-            df_bench_reset.columns = ["Data Rilevazione", "Prezzo", "Var %"]
+            # Rinomina Colonne (Italiano UpperCase come richiesto)
+            headers_map = {
+                "index": "Data", "Date": "Data",
+                "Ultimo": "Ultimo", "Apertura": "Apertura", 
+                "Massimo": "Massimo", "Minimo": "Minimo", 
+                "Volume": "Vol.", "Var %": "Var. %", "RENDIMENTO %": "RENDIMENTO %"
+            }
+            df_asset_reset = df_asset_reset.rename(columns=headers_map)
+            df_bench_reset = df_bench_reset.rename(columns=headers_map)
             
-            # 4. Formattazione Dati
-            # Gestione Date (rimozione timezone)
-            if df_asset_reset["Data Rilevazione"].dt.tz is not None:
-                df_asset_reset["Data Rilevazione"] = df_asset_reset["Data Rilevazione"].dt.tz_localize(None)
-            if df_bench_reset["Data Rilevazione"].dt.tz is not None:
-                df_bench_reset["Data Rilevazione"] = df_bench_reset["Data Rilevazione"].dt.tz_localize(None)
-                
-            # Gestione Percentuali
-            df_asset_reset["Var %"] = df_asset_reset["Var %"].apply(fmt_pct)
-            df_bench_reset["Var %"] = df_bench_reset["Var %"].apply(fmt_pct)
+            # FORMATTAZIONE VALORI
+            # Date
+            if df_asset_reset["Data"].dt.tz is not None: df_asset_reset["Data"] = df_asset_reset["Data"].dt.tz_localize(None)
+            if df_bench_reset["Data"].dt.tz is not None: df_bench_reset["Data"] = df_bench_reset["Data"].dt.tz_localize(None)
             
-            # 5. Colonna Separatore Vuota
-            df_sep = pd.DataFrame([""] * len(df_asset_reset), columns=[" "])
+            # Numeri e Percentuali
+            for df_temp in [df_asset_reset, df_bench_reset]:
+                for col in df_temp.columns:
+                    if "Var" in col or "RENDIMENTO" in col:
+                        df_temp[col] = df_temp[col].apply(fmt_pct)
+                    elif col not in ["Data", "Vol."]:
+                        df_temp[col] = df_temp[col].apply(fmt_num)
             
-            # 6. Unione Orizzontale (Data | Prezzo | Var | Vuoto | Data | Prezzo | Var)
+            # --- DOPPIA COLONNA SEPARATORE ---
+            df_sep = pd.DataFrame(index=df_asset_reset.index)
+            df_sep[" "] = "" 
+            df_sep["  "] = "" # Seconda colonna vuota
+            
+            # Unione Finale
             df_final = pd.concat([df_asset_reset, df_sep, df_bench_reset], axis=1)
             
             start_row_data = 12
             ws = writer.sheets[sheet_name]
             
-            # INTESTAZIONI DINAMICHE
-            # Titolo Asset (es. ENEL)
-            ws.merge_cells(start_row=start_row_data-1, start_column=1, end_row=start_row_data-1, end_column=3)
+            # INTESTAZIONI DINAMICHE SOPRA I BLOCCHI
+            # Asset Block (Colonne A-H)
+            ws.merge_cells(start_row=start_row_data-1, start_column=1, end_row=start_row_data-1, end_column=8)
             ws.cell(row=start_row_data-1, column=1, value=full_name.upper()) 
             
-            # Titolo Benchmark (es. FTSE MIB) - Nota: Colonna 5 (E) perché c'è il separatore in D
-            ws.merge_cells(start_row=start_row_data-1, start_column=5, end_row=start_row_data-1, end_column=7)
-            ws.cell(row=start_row_data-1, column=5, value=bench_clean.upper())
+            # Bench Block (Colonne K-R) -> Nota lo shift di 2 colonne vuote (I, J)
+            ws.merge_cells(start_row=start_row_data-1, start_column=11, end_row=start_row_data-1, end_column=18)
+            ws.cell(row=start_row_data-1, column=11, value=bench_clean.upper())
             
-            # SCRITTURA TABELLA (Senza indice, perché le date sono ora colonne)
+            # SCRITTURA TABELLA
             df_final.to_excel(writer, sheet_name=sheet_name, startrow=start_row_data, startcol=0, index=False)
             
-            # FORMATTAZIONE VISIVA
+            # FORMATTAZIONE VISIVA GLOBALE
             for row in ws.iter_rows():
                 for cell in row:
                     cell.alignment = center_align
-                    # Grassetto per intestazioni e titoli
+                    # Grassetto per intestazioni
                     if cell.row == 1 or cell.row == start_row_data or cell.row == start_row_data+1:
                         cell.font = header_font
 
-            # LARGHEZZA COLONNE (Adattata alla nuova struttura)
-            ws.column_dimensions['A'].width = 18 # Data Asset
-            ws.column_dimensions['B'].width = 12 # Prezzo Asset
-            ws.column_dimensions['C'].width = 12 # Var Asset
-            ws.column_dimensions['D'].width = 3  # Separatore (Stretto)
-            ws.column_dimensions['E'].width = 18 # Data Bench
-            ws.column_dimensions['F'].width = 12 # Prezzo Bench
-            ws.column_dimensions['G'].width = 12 # Var Bench
+            # LARGHEZZA COLONNE AUTOMATICA (Customizzata)
+            # Layout: 8 cols (Asset) + 2 cols (Sep) + 8 cols (Bench)
+            col_widths = [12, 10, 10, 10, 10, 12, 10, 12] # Data, Ult, Ap, Max, Min, Vol, Var, Rend
+            
+            # Applica larghezze Asset
+            for i, w in enumerate(col_widths):
+                col_letter = chr(65 + i) # A, B, C...
+                ws.column_dimensions[col_letter].width = w
+            
+            # Separatori (I, J)
+            ws.column_dimensions['I'].width = 3
+            ws.column_dimensions['J'].width = 3
+            
+            # Applica larghezze Benchmark (K...)
+            for i, w in enumerate(col_widths):
+                col_letter = chr(75 + i) # K=75 ascii
+                ws.column_dimensions[col_letter].width = w
             
     return output.getvalue()
 
@@ -390,7 +423,7 @@ if st.button("🚀 Avvia Analisi (Aggiorna)", type="primary"):
     elif start_date >= end_date:
         st.error("⚠️ Date non valide.")
     else:
-        with st.spinner(f'Analisi in corso (Yahoo API)...'):
+        with st.spinner(f'Analisi in corso (Yahoo API Full OHLCV)...'):
             results = {}
             error_log = []
             
@@ -443,7 +476,7 @@ if st.session_state.get('done'):
         st.info(f"Dati: **{freq_option}**\n\nDal: **{start_date}**\n\nAl: **{end_date}**")
 
     excel_file = generate_excel_report(results, rf_input, mrp_input, selected_bench_display)
-    st.download_button("📥 Scarica Report Excel", data=excel_file, file_name="Analisi_Finanziaria_Pro.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+    st.download_button("📥 Scarica Report Excel (Full Data)", data=excel_file, file_name="Analisi_Finanziaria_Pro.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
 
 st.markdown("---")
 with st.expander("ℹ️ Info Metodologiche"):
