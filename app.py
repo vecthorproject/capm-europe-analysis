@@ -5,7 +5,7 @@ import yfinance as yf
 import io 
 import requests 
 import datetime
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Font
 
 # =========================
 # CONFIGURAZIONE APP
@@ -18,13 +18,13 @@ I dati fondamentali sono estratti in tempo reale per calcolare il **Beta Unlever
 """)
 
 # =========================
-# GESTIONE STATO (Session State)
+# GESTIONE STATO
 # =========================
 if 'selected_tickers_list' not in st.session_state: st.session_state['selected_tickers_list'] = [] 
 if 'ticker_names_map' not in st.session_state: st.session_state['ticker_names_map'] = {}
 
 # =========================
-# HELPERS & MAPPATURA
+# HELPERS
 # =========================
 def map_industry_to_ateco(industry):
     mapping = {
@@ -62,25 +62,22 @@ def add_ticker():
             st.session_state['ticker_names_map'][sym] = name
 
 # =========================
-# 1. MOTORE DATI (Robustezza Totale)
+# 1. MOTORE DATI (Robustezza Migliorata)
 # =========================
 def get_financials_robust(ticker_obj):
-    """Estrae dati fondamentali con logica a cascata per evitare zeri"""
+    """Estrae Debito usando sia .info (più sicuro) che .balance_sheet"""
     try:
         info = ticker_obj.info
         bs = ticker_obj.balance_sheet
         
-        # 1. Equity (Market Cap)
         mkt_cap = info.get('marketCap', 0)
-        
-        # 2. Debito Totale (Ricerca Aggressiva)
         total_debt = 0.0
         
-        # A. Da Info (spesso più affidabile per summary)
+        # 1. Metodo Primario: Da Info (spesso pre-calcolato da Yahoo)
         if 'totalDebt' in info and info['totalDebt'] is not None:
              total_debt = float(info['totalDebt'])
         
-        # B. Se A fallisce, provo dal Bilancio
+        # 2. Metodo Fallback: Dal Bilancio se Info fallisce
         if total_debt == 0 and not bs.empty:
             if 'Total Debt' in bs.index:
                 total_debt = float(bs.loc['Total Debt'].iloc[0])
@@ -89,34 +86,31 @@ def get_financials_robust(ticker_obj):
                 st_debt = float(bs.loc['Current Debt'].iloc[0]) if 'Current Debt' in bs.index else 0.0
                 total_debt = lt + st_debt
         
-        # 3. Tax Rate (Standard 24% se non disponibile)
-        tax_rate = 0.24
-
         return {
             "Market Cap": mkt_cap,
             "Total Debt": total_debt,
             "Industry": info.get('industry', 'N.D.'),
-            "Tax Rate": tax_rate
+            "Tax Rate": 0.24
         }
     except:
         return None
 
 def get_market_data_5y(ticker):
-    """Scarica 5 anni di dati settimanali"""
+    """Scarica 5 anni di dati settimanali (Rendimenti Semplici Standard)"""
     try:
         end_date = datetime.date.today()
-        start_date = end_date - datetime.timedelta(weeks=260) # 5 Anni esatti
+        start_date = end_date - datetime.timedelta(weeks=260) # 5 Anni
         
         df = yf.download(ticker, start=start_date, end=end_date, progress=False)
         if df.empty: return None
         
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         
-        # Resampling Settimanale (Venerdì)
         df_wk = df.resample('W-FRI').agg({
             'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
         }).dropna()
         
+        # Uso Rendimenti Semplici (Standard CAPM Accademico)
         df_wk['Var %'] = df_wk['Close'].pct_change()
         return df_wk
     except: return None
@@ -154,19 +148,18 @@ if st.button("🚀 Avvia Calcolo (5 Anni)", type="primary"):
                 fund = get_financials_robust(yf.Ticker(t))
                 
                 if df_ass is not None and df_bench is not None:
-                    # Allineamento Temporale Rigoroso
                     common = df_ass.index.intersection(df_bench.index)
-                    if len(common) > 50: # Minimo statistico per 5 anni
+                    if len(common) > 50:
                         y = df_ass.loc[common, 'Var %'].dropna()
                         x = df_bench.loc[common, 'Var %'].dropna()
                         idx_clean = y.index.intersection(x.index)
                         
-                        # 1. Beta Levered (Regressione)
-                        cov = np.cov(y.loc[idx_clean], x.loc[idx_clean])[0][1]
-                        var = np.var(x.loc[idx_clean])
+                        # Calcolo Beta Statistico (ddof=1 per varianza campionaria)
+                        cov = np.cov(y.loc[idx_clean], x.loc[idx_clean], ddof=1)[0][1]
+                        var = np.var(x.loc[idx_clean], ddof=1)
                         beta_lev = cov / var if var != 0 else 0
                         
-                        # 2. Beta Unlevered (Hamada)
+                        # Hamada Unlevering
                         beta_unlev = beta_lev
                         d_e_ratio = 0.0
                         equity = 0
@@ -177,7 +170,6 @@ if st.button("🚀 Avvia Calcolo (5 Anni)", type="primary"):
                             debt = fund['Total Debt']
                             if equity > 0:
                                 d_e_ratio = debt / equity
-                                # Bu = Bl / [1 + (1-T)*D/E]
                                 beta_unlev = beta_lev / (1 + (1 - fund['Tax Rate']) * d_e_ratio)
                         
                         metrics = {
@@ -195,12 +187,12 @@ if st.button("🚀 Avvia Calcolo (5 Anni)", type="primary"):
         st.session_state['res'] = results
 
 # =========================
-# OUTPUT & EXCEL (Fix Formattazione Totale)
+# OUTPUT & EXCEL (Con Fix Larghezza Colonne)
 # =========================
 if 'res' in st.session_state:
     data = st.session_state['res']
     
-    # Sintesi a video
+    # Sintesi
     rows = []
     for k, v in data.items():
         m = v['metrics']
@@ -215,7 +207,7 @@ if 'res' in st.session_state:
     st.subheader("📋 Sintesi Analisi (5 Anni)")
     st.table(pd.DataFrame(rows))
 
-    # Generazione Excel
+    # Generazione Excel Perfetto
     def generate_perfect_excel(res_data):
         bio = io.BytesIO()
         with pd.ExcelWriter(bio, engine='openpyxl') as writer:
@@ -225,17 +217,14 @@ if 'res' in st.session_state:
             df_s.to_excel(writer, sheet_name="Sintesi", index=False, startrow=1)
             ws = writer.sheets["Sintesi"]
             
-            # Intestazione
-            ws.cell(1, 1, "REPORT ANALISI RISCHIO (5 ANNI WEEKLY)").font = Font(bold=True, size=14, color="000080")
+            ws.cell(1, 1, "REPORT ANALISI RISCHIO (5 ANNI WEEKLY)").font = Font(bold=True, size=14)
             
-            # Note Metodologiche
             r_start = len(df_s) + 5
-            ws.cell(r_start, 1, "METODOLOGIA E DETTAGLIO DATI").font = Font(bold=True)
-            ws.cell(r_start+1, 1, "1. Finestra Temporale: 5 Anni (260 Settimane).")
+            ws.cell(r_start, 1, "METODOLOGIA").font = Font(bold=True)
+            ws.cell(r_start+1, 1, "1. Rendimenti: Semplici (pct_change), Finestra 5 Anni.")
             ws.cell(r_start+2, 1, "2. D/E Ratio = Total Debt / Market Cap (Valori di Mercato).")
             ws.cell(r_start+3, 1, "3. Formula Hamada: Bu = Bl / [1 + (0.76 * D/E)].")
             
-            # Dettaglio Valori Grezzi
             curr = r_start + 5
             for k, v in res_data.items():
                 m = v['metrics']
@@ -246,44 +235,38 @@ if 'res' in st.session_state:
 
             # --- FOGLI 2+: DATI STORICI ---
             for t, d in res_data.items():
-                # Dati OHLCV
                 df_exp = d['df'].copy().reset_index()
-                # Rinomina colonne per pulizia
-                df_exp.columns = ["Data Rilevazione", "Apertura", "Massimo", "Minimo", "Chiusura", "Volume", "Var %"]
-                df_exp['Data Rilevazione'] = df_exp['Data Rilevazione'].dt.date # Via l'orario
+                df_exp.columns = ["Data", "Apertura", "Massimo", "Minimo", "Chiusura", "Volume", "Var %"]
+                df_exp['Data'] = df_exp['Data'].dt.date 
                 
                 sheet_name = f"{t.replace('.MI','')[:20]}_Dati"
                 df_exp.to_excel(writer, sheet_name=sheet_name, index=False)
                 
-                # Bilancio (se c'è)
                 if not d['bs'].empty:
                     d['bs'].to_excel(writer, sheet_name=f"{t.replace('.MI','')[:20]}_BS")
 
-            # --- FORMATTAZIONE "NO ###" (BODYGUARD) ---
+            # --- FORMATTAZIONE "NO ###" ---
             for sheet in writer.sheets:
                 ws_cur = writer.sheets[sheet]
                 for col in ws_cur.columns:
                     col_letter = col[0].column_letter
                     header_txt = str(col[0].value).lower()
                     
-                    # Logica larghezza
                     if "data" in header_txt or "date" in header_txt:
-                        final_width = 22 # Larghezza fissa sicura per Date
+                        final_width = 22 # Larghezza SICURA per Date
                     else:
                         max_len = 0
                         for cell in col:
                             try:
                                 if cell.value: max_len = max(max_len, len(str(cell.value)))
                             except: pass
-                        final_width = min(max_len * 1.2 + 2, 60) # Moltiplicatore + Tetto max
+                        final_width = min(max_len * 1.2 + 2, 60)
                     
                     ws_cur.column_dimensions[col_letter].width = final_width
-                    
-                    # Allineamento Centrato
                     for cell in col:
                         cell.alignment = Alignment(horizontal='center', vertical='center')
 
         return bio.getvalue()
 
-    st.download_button("📥 Scarica Analisi Completa (Excel)", data=generate_perfect_excel(data), file_name="Analisi_Beta_5Y_Pro.xlsx", type="primary")
+    st.download_button("📥 Scarica Excel (Completo)", data=generate_perfect_excel(data), file_name="Analisi_Beta_5Y_Pro.xlsx", type="primary")
     
