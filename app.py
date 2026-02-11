@@ -54,20 +54,23 @@ def search_yahoo_finance(query):
 # =========================
 st.sidebar.title("⚙️ Configurazione Analisi")
 
-# A. Orizzonte Temporale
+# A. Orizzonte Temporale (MODIFICATO: 3 Anni -> 2 Anni)
 st.sidebar.subheader("1. Orizzonte & Frequenza")
 time_period = st.sidebar.selectbox(
     "Finestra Storica:", 
-    ["5 Anni (Lungo Periodo)", "3 Anni (Medio Periodo)", "1 Anno (Breve Periodo)"],
+    ["5 Anni (Lungo Periodo)", "2 Anni (Medio Periodo)", "1 Anno (Breve Periodo)"],
     index=0
 )
 frequency = st.sidebar.selectbox("Frequenza Dati:", ["Settimanale (Consigliato)", "Mensile"])
 
 # Setup Date
 end_date = datetime.date.today()
-if "5 Anni" in time_period: delta_weeks = 260
-elif "3 Anni" in time_period: delta_weeks = 156
-else: delta_weeks = 52
+if "5 Anni" in time_period: 
+    delta_weeks = 260
+elif "2 Anni" in time_period: # MODIFICATO QUI
+    delta_weeks = 104         # 52 settimane * 2 anni
+else: 
+    delta_weeks = 52
 start_date = end_date - datetime.timedelta(weeks=delta_weeks)
 
 # === LOGICA ACCADEMICA CORRETTA ===
@@ -296,10 +299,6 @@ if st.session_state['portfolio']:
                     
                     # --- FOGLIO SINTESI ---
                     df_s = pd.DataFrame(summary_rows)
-                    # Convertiamo le stringhe in numeri per Excel prima di scrivere
-                    # (Rimuoviamo il % per il Ke per farlo trattare come numero)
-                    df_s_excel = df_s.copy()
-                    
                     df_s.to_excel(writer, sheet_name="Sintesi", index=False, startrow=1)
                     ws = writer.sheets["Sintesi"]
                     
