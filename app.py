@@ -5,7 +5,9 @@ import yfinance as yf
 import io 
 import requests 
 import datetime
-from openpyxl.styles import Alignment, Font, NamedStyle
+import plotly.express as px
+import plotly.graph_objects as go
+from openpyxl.styles import Alignment, Font
 
 # =========================
 # CONFIGURAZIONE APP
@@ -54,12 +56,12 @@ def search_yahoo_finance(query):
 # =========================
 st.sidebar.title("⚙️ Configurazione Analisi")
 
-# A. Orizzonte Temporale (MODIFICATO: 3 Anni -> 2 Anni)
+# A. Orizzonte Temporale
 st.sidebar.subheader("1. Orizzonte & Frequenza")
 time_period = st.sidebar.selectbox(
     "Finestra Storica:", 
     ["5 Anni (Lungo Periodo)", "2 Anni (Medio Periodo)", "1 Anno (Breve Periodo)"],
-    index=0
+    index=1 # Default: 2 Anni (104 settimane)
 )
 frequency = st.sidebar.selectbox("Frequenza Dati:", ["Settimanale (Consigliato)", "Mensile"])
 
@@ -67,8 +69,8 @@ frequency = st.sidebar.selectbox("Frequenza Dati:", ["Settimanale (Consigliato)"
 end_date = datetime.date.today()
 if "5 Anni" in time_period: 
     delta_weeks = 260
-elif "2 Anni" in time_period: # MODIFICATO QUI
-    delta_weeks = 104         # 52 settimane * 2 anni
+elif "2 Anni" in time_period:
+    delta_weeks = 104
 else: 
     delta_weeks = 52
 start_date = end_date - datetime.timedelta(weeks=delta_weeks)
@@ -141,12 +143,11 @@ else:
     st.info("Il portafoglio è vuoto. Cerca un titolo per iniziare l'analisi.")
 
 # =========================
-# 3. MOTORE DI CALCOLO (Scientifico)
+# 3. MOTORE DI CALCOLO (Scientifico & Robusto)
 # =========================
 def get_financials_robust(ticker_obj):
     """
-    Estrae i dati fondamentali per il calcolo di Hamada.
-    Usa 'Total Debt' e 'Market Cap' (Equity Value).
+    Estrae dati fondamentali con gestione fallback per MultiIndex e chiavi mancanti.
     """
     try:
         info = ticker_obj.info
@@ -159,13 +160,16 @@ def get_financials_robust(ticker_obj):
         if 'totalDebt' in info and info['totalDebt'] is not None:
              total_debt = float(info['totalDebt'])
         
-        # 2. Metodo Fallback: Scansione Bilancio
-        if total_debt == 0 and not bs.empty:
-            if 'Total Debt' in bs.index:
+        # 2. Metodo Fallback: Scansione Bilancio (Con supporto MultiIndex)
+        elif not bs.empty:
+            # Normalizzazione indice per evitare crash su MultiIndex
+            idx = bs.index.get_level_values(0) if isinstance(bs.index, pd.MultiIndex) else bs.index
+            
+            if 'Total Debt' in idx:
                 total_debt = float(bs.loc['Total Debt'].iloc[0])
-            elif 'Long Term Debt' in bs.index:
+            elif 'Long Term Debt' in idx:
                 lt = float(bs.loc['Long Term Debt'].iloc[0])
-                st_debt = float(bs.loc['Current Debt'].iloc[0]) if 'Current Debt' in bs.index else 0.0
+                st_debt = float(bs.loc['Current Debt'].iloc[0]) if 'Current Debt' in idx else 0.0
                 total_debt = lt + st_debt
         
         return {
@@ -177,10 +181,6 @@ def get_financials_robust(ticker_obj):
     except: return None
 
 def get_market_data(ticker, start, end, interval, rule_resample):
-    """
-    Scarica i prezzi e calcola i rendimenti.
-    Nota: Usa Rendimenti Semplici (Pct Change) coerenti con il CAPM standard.
-    """
     try:
         df = yf.download(ticker, start=start, end=end, interval=interval, progress=False)
         if df.empty: return None
@@ -188,8 +188,9 @@ def get_market_data(ticker, start, end, interval, rule_resample):
         if isinstance(df.columns, pd.MultiIndex): 
             df.columns = df.columns.get_level_values(0)
         
-        # Resampling solo se necessario (Settimanale da Giornaliero)
-        # Se Mensile (1mo), saltiamo questo step per mantenere il dato nativo
+        # 🟢 FIX RESAMPLING: Forward Fill per gestire festività
+        df = df.ffill()
+
         if rule_resample:
             df_final = df.resample(rule_resample).agg({
                 'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
@@ -199,7 +200,7 @@ def get_market_data(ticker, start, end, interval, rule_resample):
 
         # ✅ RENDIMENTI SEMPLICI (Standard CAPM/Beta)
         df_final['Var %'] = df_final['Close'].pct_change()
-        return df_final
+        return df_final.dropna()
     except: return None
 
 # =========================
@@ -211,7 +212,6 @@ if st.session_state['portfolio']:
         results = {}
         with st.spinner(f"Elaborazione dati ({frequency}) in corso..."):
             
-            # Scarico Benchmark
             df_bench = get_market_data(sel_bench_code, start_date, end_date, yf_interval, resample_rule)
             
             for t, t_name in st.session_state['portfolio'].items():
@@ -219,93 +219,106 @@ if st.session_state['portfolio']:
                 fund = get_financials_robust(yf.Ticker(t))
                 
                 if df_asset is not None and df_bench is not None:
-                    # Sincronizzazione Temporale (Intersection)
-                    common = df_asset.index.intersection(df_bench.index)
+                    # 🟢 FIX DATE: Uso MERGE per allineamento perfetto
+                    combined = pd.merge(
+                        df_asset[['Var %']], 
+                        df_bench[['Var %']], 
+                        left_index=True, 
+                        right_index=True, 
+                        suffixes=('_asset', '_bench')
+                    ).dropna()
                     
-                    # Controllo Osservazioni Minime (es. 2 anni = ~100 settimane)
-                    if len(common) > 10: 
-                        y = df_asset.loc[common, 'Var %'].dropna()
-                        x = df_bench.loc[common, 'Var %'].dropna()
-                        idx_clean = y.index.intersection(x.index)
+                    if len(combined) > 10: 
+                        y = combined['Var %_asset']
+                        x = combined['Var %_bench']
                         
-                        # A. Calcolo Beta Levered (Regressione OLS Statistica)
-                        # ddof=1 per Varianza Campionaria (Sample Variance)
-                        cov = np.cov(y.loc[idx_clean], x.loc[idx_clean], ddof=1)[0][1]
-                        var = np.var(x.loc[idx_clean], ddof=1)
+                        # A. Calcolo Beta Levered (Cov/Var con ddof=1)
+                        cov = np.cov(y, x, ddof=1)[0][1]
+                        var = np.var(x, ddof=1)
                         beta_lev = cov / var if var != 0 else 0
                         
-                        # B. Calcolo Beta Unlevered (Formula Hamada)
-                        # Bu = Bl / [1 + (1 - Tax) * (D/E)]
-                        beta_unlev = beta_lev
+                        # B. Hamada (Con protezione divisione zero)
                         d_e_ratio = 0.0
-                        
                         if fund and fund['Market Cap'] > 0:
                             d_e_ratio = fund['Total Debt'] / fund['Market Cap']
-                            beta_unlev = beta_lev / (1 + (1 - fund['Tax Rate']) * d_e_ratio)
                         
-                        # C. Costo Equity (CAPM Standard)
+                        beta_unlev = beta_lev / (1 + (1 - 0.24) * d_e_ratio)
+                        
+                        # C. CAPM
                         ke = rf_input + (beta_lev * mrp_input)
 
                         metrics = {
-                            "Beta Lev": beta_lev,
-                            "Beta Unlev": beta_unlev,
-                            "Ke": ke,
-                            "D/E Ratio": d_e_ratio,
+                            "Beta Lev": beta_lev, "Beta Unlev": beta_unlev, "Ke": ke, "D/E Ratio": d_e_ratio,
                             "Equity": fund['Market Cap'] if fund else 0,
                             "Debt": fund['Total Debt'] if fund else 0,
                             "ATECO": map_industry_to_ateco(fund.get('Industry') if fund else 'N.D.')
                         }
                         
+                        # Salvo anche i dati combinati per il grafico
                         results[t] = {
-                            "df": df_asset.loc[idx_clean], 
-                            "metrics": metrics,
-                            "bs": yf.Ticker(t).balance_sheet,
-                            "name": t_name
+                            "df": df_asset, "combined": combined,
+                            "metrics": metrics, "bs": yf.Ticker(t).balance_sheet, "name": t_name
                         }
         
         # OUTPUT A VIDEO
         if results:
-            st.success("Analisi completata.")
-            st.subheader(f"📊 Sintesi Coefficienti ({frequency})")
+            st.success("Analisi completata con successo.")
             
+            # 1. TABELLA SINTESI
+            st.subheader(f"📊 Sintesi Coefficienti ({frequency})")
             summary_rows = []
             for k, v in results.items():
                 m = v['metrics']
                 summary_rows.append({
                     "Società": v['name'],
-                    "Beta Lev (Bl)": f"{m['Beta Lev']:.3f}",   # 3 Decimali
-                    "Beta Asset (Bu)": f"{m['Beta Unlev']:.3f}", # 3 Decimali
-                    "D/E (Mkt)": f"{m['D/E Ratio']:.3f}",       # 3 Decimali
+                    "Beta Lev (Bl)": f"{m['Beta Lev']:.3f}",
+                    "Beta Asset (Bu)": f"{m['Beta Unlev']:.3f}",
+                    "D/E (Mkt)": f"{m['D/E Ratio']:.3f}",
                     "Ke (Costo Equity)": f"{m['Ke']*100:.2f}%",
                     "Settore": m['ATECO']
                 })
-            
             st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
-            
+
+            # 🟢 2. GRAFICO SCL (Regressione)
+            st.subheader("📈 Security Characteristic Line (SCL)")
+            cols = st.columns(len(results))
+            for idx, (k, v) in enumerate(results.items()):
+                with cols[idx % len(cols)]:
+                    comb = v['combined']
+                    fig = px.scatter(comb, x='Var %_bench', y='Var %_asset', 
+                                     title=f"SCL: {v['name']}", opacity=0.6,
+                                     labels={'Var %_bench': 'Rendimenti Mercato', 'Var %_asset': 'Rendimenti Titolo'})
+                    # Linea di regressione
+                    fig.add_trace(go.Scatter(
+                        x=comb['Var %_bench'], 
+                        y=v['metrics']['Beta Lev'] * comb['Var %_bench'], 
+                        mode='lines', name=f'Beta = {v["metrics"]["Beta Lev"]:.2f}', 
+                        line=dict(color='red', width=2)
+                    ))
+                    st.plotly_chart(fig, use_container_width=True)
+
             # Note metodologiche
             st.markdown(f"""
             <div style="background-color:#f9f9f9; padding:10px; border-radius:5px; font-size:12px; color:#555;">
             <strong>Nota Metodologica:</strong><br>
-            • <strong>Beta Levered:</strong> Calcolato su rendimenti semplici ({time_period}).<br>
-            • <strong>D/E Ratio:</strong> <em>Market D/E</em> (Debito Totale / Capitalizzazione di Mercato).<br>
-            • <strong>Beta Unlevered:</strong> De-leveraging via formula di Hamada (Tax Rate 24%).
+            • <strong>Beta Levered:</strong> Regressione OLS su rendimenti semplici ({time_period}).<br>
+            • <strong>D/E Ratio:</strong> <em>Market Value</em> (Debito Totale / Market Cap).<br>
+            • <strong>Beta Unlevered:</strong> Formula di Hamada (Tax Rate 24%).
             </div>
             """, unsafe_allow_html=True)
 
-            # GENERATORE EXCEL PERFETTO
+            # 3. GENERATORE EXCEL PERFETTO
             def make_excel_perfect(res_data):
                 bio = io.BytesIO()
                 with pd.ExcelWriter(bio, engine='openpyxl') as writer:
                     
-                    # --- FOGLIO SINTESI ---
+                    # FOGLIO SINTESI
                     df_s = pd.DataFrame(summary_rows)
                     df_s.to_excel(writer, sheet_name="Sintesi", index=False, startrow=1)
                     ws = writer.sheets["Sintesi"]
                     
-                    # Titolo
                     ws.cell(1, 1, f"REPORT ANALISI RISCHIO ({time_period})").font = Font(bold=True, size=14, color="000080")
                     
-                    # Parametri
                     r_p = len(df_s) + 5
                     ws.cell(r_p, 1, "PARAMETRI DI CALCOLO").font = Font(bold=True)
                     ws.cell(r_p+1, 1, f"Risk Free (Rf): {rf_input*100:.2f}%")
@@ -319,7 +332,7 @@ if st.session_state['portfolio']:
                     ws.cell(r_f+2, 1, "Beta Unlev: Bl / [1 + (1-T)*D/E]")
                     ws.cell(r_f+3, 1, "Ke (CAPM): Rf + Bl * MRP")
 
-                    # Valori Grezzi (Trasparenza)
+                    # Valori Grezzi
                     curr = r_f + 5
                     for k, v in res_data.items():
                         m = v['metrics']
@@ -329,9 +342,8 @@ if st.session_state['portfolio']:
                         ws.cell(curr+3, 1, f"- D/E Ratio Calc: {m['D/E Ratio']:.4f}")
                         curr += 5
 
-                    # --- FOGLI DATI ---
+                    # FOGLI DATI
                     for t, d in res_data.items():
-                        # Dati Prezzi
                         df_exp = d['df'].copy().reset_index()
                         df_exp.columns = ["Data", "Apertura", "Massimo", "Minimo", "Chiusura", "Volume", "Var %"]
                         df_exp['Data'] = df_exp['Data'].dt.date
@@ -339,37 +351,33 @@ if st.session_state['portfolio']:
                         safe_name = t.replace(".MI", "").replace(".","")[:20]
                         df_exp.to_excel(writer, sheet_name=f"{safe_name}_Dati", index=False)
                         
-                        # Bilancio
                         if not d['bs'].empty:
                             d['bs'].to_excel(writer, sheet_name=f"{safe_name}_BS")
                     
-                    # --- FORMATTAZIONE AVANZATA (BODYGUARD ###) ---
-                    number_style = NamedStyle(name="decimal_3", number_format="0.000")
-                    
+                    # 🟢 FORMATTAZIONE BODYGUARD (No NamedStyle Error)
                     for sheet in writer.sheets:
                         ws_cur = writer.sheets[sheet]
                         for col in ws_cur.columns:
                             col_letter = col[0].column_letter
                             head = str(col[0].value).lower()
                             
-                            # 1. Larghezza Colonne
-                            if "data" in head or "date" in head:
-                                width = 22 # Larghezza fissa per date
+                            # Larghezza
+                            if "data" in head or "date" in head: width = 22
                             else:
                                 max_l = 0
                                 for cell in col:
-                                    try:
+                                    try: 
                                         if cell.value: max_l = max(max_l, len(str(cell.value)))
                                     except: pass
-                                width = min(max_l * 1.2 + 2, 50) # Auto-fit con limite
+                                width = min(max_l * 1.2 + 2, 50)
                             ws_cur.column_dimensions[col_letter].width = width
                             
-                            # 2. Allineamento e Formato Numerico
+                            # Stile e Numeri (3 decimali)
                             for cell in col:
                                 cell.alignment = Alignment(horizontal='center', vertical='center')
-                                # Se è un numero (escluse date e intestazioni), applica 3 decimali
                                 if isinstance(cell.value, (int, float)) and cell.row > 1:
-                                    if "Beta" in head or "D/E" in head or "Ratio" in head:
+                                    # Applica formato SOLO se è una metrica pertinente
+                                    if "Beta" in head or "D/E" in head or "Var" in head:
                                         cell.number_format = "0.000"
 
                 return bio.getvalue()
